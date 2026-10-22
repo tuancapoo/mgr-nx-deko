@@ -1,0 +1,19 @@
+# ReXGlue recompilation manifest for Metal Gear Rising: Revengeance (Xbox 360 disc, title 4B4E080A, default.xex).
+#
+# The file keeps the name sa2_manifest.toml and the project name "sa2" on purpose: tools/codegen.ps1, the CMake files
+# and the Switch build read those names. They are renamed to "mgr" in one step once the first translation works.
+#
+# default.xex: image base 0x82000000, entry point 0x82302C28, image size 0x01A40000 (27,525,120 bytes), XEX 0.0.0.4,
+# compressed (LZX) and encrypted (AES-128). The disc has no other .xex that the game loads (the 23 .xex files in
+# $SystemUpdate are dashboard updates). Read with tools/extract_iso.py --info, 2026-10-15.
+
+[project]
+name = "sa2"
+sdk_version = "0.10.0"
+game_root = "../assets/game_root"
+
+[entrypoint]
+file_path = "../assets/game_root/default.xex"
+out_directory_path = "generated/default"
+
+includes = ["overrides.toml", "codegen_flavor.toml"]

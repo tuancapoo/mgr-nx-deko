@@ -1,0 +1,39 @@
+# MGR reNut/plume/deko3d test build. Keep this in switch/mgr-nx-deko/.
+# The old Vulkan cache and .mesp library belong to the reference renderer.
+sa2_renderer = "renut"
+renut_gpu_backend = "deko3d"
+sa2_render_height_handheld = 360
+sa2_render_height_docked = 360
+sa2_renut_msaa = 0
+sa2_renut_vblank_pacing = true
+mgr_renut_vsync_relaxed = true
+mgr_fps_limit = 0
+
+input_xbox_layout = true
+input_joycon_sideways = false
+mgr_shared_input = true
+audio_mute = false
+audio_xma_profile = false
+mgr_wwise_native_dsp = true
+
+# CPU store cards require complete tracking of every guest write. This baseline
+# uses content checks while that instrumentation is not enabled for MGR.
+banjo_renut_store_cards = false
+banjo_deko3d_alpha_spec = false
+# Every pixel shader in one variant (the shipped DKSH cache): no shader compiles while playing, in any stage.
+banjo_gpu_output_trim = false
+
+# Lightweight integration logs only; no stack sampling or shader discovery.
+log_to_file = true
+log_level = "info"
+log_async = true
+log_flush_interval = 2
+log_max_file_size_mb = 20
+log_max_files = 3
+switch_profile_report = false
+switch_profile_stacks = false
+sa2_enhancements_report_s = 0
+mgr_dump_shaders = false
+mgr_dump_memory = false
+sa2_video_s = 0
+perf_log_csv = ""

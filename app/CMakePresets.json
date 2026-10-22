@@ -1,0 +1,33 @@
+{
+    "version": 6,
+    "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+    "configurePresets": [
+        {
+            "name": "win-pc",
+            "displayName": "Windows x64, clang, RelWithDebInfo (stage 1)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/../out/pc",
+            "cacheVariables": {
+                "CMAKE_C_COMPILER": "clang",
+                "CMAKE_CXX_COMPILER": "clang++",
+                "CMAKE_C_FLAGS": "-march=x86-64-v2",
+                "CMAKE_CXX_FLAGS": "-march=x86-64-v2",
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "REXGLUE_ENABLE_TRACY": "OFF",
+                "REXGLUE_USE_VULKAN": "ON"
+            },
+            "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+        },
+        {
+            "name": "win-pc-debug",
+            "displayName": "Windows x64, clang, Debug",
+            "inherits": "win-pc",
+            "binaryDir": "${sourceDir}/../out/pc-debug",
+            "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+        }
+    ],
+    "buildPresets": [
+        { "name": "win-pc", "configurePreset": "win-pc" },
+        { "name": "win-pc-debug", "configurePreset": "win-pc-debug" }
+    ]
+}

@@ -1,0 +1,2647 @@
+diff --git a/XenosRecomp/pch_min.h b/XenosRecomp/pch_min.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..65e6c595c96988830f3d1092e1b783a3cf437806
+--- /dev/null
++++ b/XenosRecomp/pch_min.h
+@@ -0,0 +1,55 @@
++#pragma once
++
++#ifdef _WIN32
++#include <Windows.h>
++#endif
++
++
++
++#include <bit>
++#include <cassert>
++#include <cstdint>
++#include <execution>
++#include <filesystem>
++#include <map>
++
++#include <fmt/core.h>
++#include <string>
++#include <unordered_map>
++#include <xxhash.h>
++
++
++template<typename T>
++static T byteSwap(T value)
++{
++    if constexpr (sizeof(T) == 1)
++        return value;
++    else if constexpr (sizeof(T) == 2)
++        return static_cast<T>(__builtin_bswap16(static_cast<uint16_t>(value)));
++    else if constexpr (sizeof(T) == 4)
++        return static_cast<T>(__builtin_bswap32(static_cast<uint32_t>(value)));
++    else if constexpr (sizeof(T) == 8) 
++        return static_cast<T>(__builtin_bswap64(static_cast<uint64_t>(value)));
++
++    assert(false && "Unexpected byte size.");
++    return value;
++}
++
++template<typename T>
++struct be
++{
++    T value;
++
++    T get() const
++    {
++        if constexpr (std::is_enum_v<T>)
++            return T(byteSwap(std::underlying_type_t<T>(value)));
++        else
++            return byteSwap(value);
++    }
++
++    operator T() const
++    {
++        return get();
++    }
++};  
+diff --git a/XenosRecomp/shader_common.h b/XenosRecomp/shader_common.h
+index 1c74034fd671b8fbef51b8631607f7f83b50f4b5..0857d6e5178cbbf25319eb50df22af7b94e2a65c 100644
+--- a/XenosRecomp/shader_common.h
++++ b/XenosRecomp/shader_common.h
+@@ -3,6 +3,42 @@
+ 
+ #define SPEC_CONSTANT_R11G11B10_NORMAL  (1 << 0)
+ #define SPEC_CONSTANT_ALPHA_TEST        (1 << 1)
++// MASSEFFECT: constants arrive through a dynamic UBO (a constant bank on Maxwell) instead of being read
++// through a 64-bit pointer. High bit so as not to clash with the UNLEASHED_RECOMP ones.
++#define SPEC_CONSTANT_CONSTANTS_UBO    (1 << 8)
++// The tfetch offset is scaled with 1/size taken from the shared constants instead of querying the
++// texture for its size. A size query is another texture unit operation.
++#define SPEC_CONSTANT_INV_TEX_SIZE    (1 << 9)
++// sa2-nx (sa2_gpu_blend_skip): the pixel's blend would leave the target exactly as it was (a UNORM target, no depth or
++// stencil write, a blend that keeps the destination when the source alpha, or the whole source, is 0 or less), so it
++// is discarded before the blend. Set by the renderer per pipeline; a NaN output is never discarded.
++#define SPEC_CONSTANT_BLEND_SKIP_ALPHA (1 << 10)
++#define SPEC_CONSTANT_BLEND_SKIP_ZERO  (1 << 11)
++// sa2-nx GPU round 2 (sa2_gpu_structured_cf): the shader's forward-only control flow as nested if/else instead of the
++// per-instruction skipTo tests (the translator emits both when it has proven them equivalent; the renderer picks).
++#define SPEC_CONSTANT_STRUCTURED_CF    (1 << 12)
++// sa2-nx GPU round 2, per-pipeline facts the native renderer knows, so the shaders stop testing them per vertex or
++// pixel (bits 5, 6 and 13 are free in the MASSEFFECT_RECOMP build):
++// sa2_gpu_texcoords_unswapped: the renderer never swaps texcoords (g_SwappedTexcoords is always 0).
++#define SPEC_CONSTANT_TEXCOORDS_UNSWAPPED (1 << 5)
++// sa2_gpu_no_texture_signs: no texture of the draw has a signed, biased or gamma component (packed signs all 0).
++#define SPEC_CONSTANT_NO_TEXTURE_SIGNS (1 << 6)
++// sa2_gpu_identity_remap: every vertex input of the pipeline keeps its component order (g_InputRemap is 0xFFF).
++#define SPEC_CONSTANT_IDENTITY_REMAP   (1 << 13)
++// sa2_gpu_index_base_held: the translator proved this vertex shader never reads the vertex index r0 starts with: with
++// the bit, r0 starts at 0 and the renderer may hold g_VertexIndexBase (and the shared block) across draws.
++#define SPEC_CONSTANT_VERTEX_INDEX_UNUSED (1 << 19)
++/*
++ * The alpha test function, specialized (bits 16-18).
++ *
++ * g_AlphaFunction used to come from the shared constants, that is, at run time, so alphaTestValue
++ * was a 7-case switch: ~8 branches in every pixel shader that does alpha testing. It was not needed
++ * at all: the app already knows the function when it creates the pipeline (it comes from RB_COLORCONTROL, which is already in the key), so with three more bits the compiler
++ * keeps the one comparison that applies and drops the other six. The output is bit-identical.
++ */
++// Bits 15, 19 and 23 are reserved (unused here; left free for the app's own use).
++#define SPEC_CONSTANT_ALPHA_FUNC_SHIFT  16
++#define SPEC_CONSTANT_ALPHA_FUNC_MASK   (7 << 16)
+ 
+ #ifdef UNLEASHED_RECOMP
+     #define SPEC_CONSTANT_BICUBIC_GI_FILTER (1 << 2)
+@@ -26,27 +62,181 @@ struct PushConstants
+ 
+ [[vk::push_constant]] ConstantBuffer<PushConstants> g_PushConstants;
+ 
+-#define g_Booleans                 vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 256)
+-#define g_SwappedTexcoords         vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 260)
+-#define g_HalfPixelOffset          vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 264)
+-#define g_AlphaThreshold           vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 272)
++// MASSEFFECT: the same blocks of the upload buffer, also as dynamic UBOs in set 4. With
++// -fvk-use-dx-layout each float4 takes 16 contiguous bytes, so any 4-byte word of the shared block is
++// a component: v[B / 16][(B % 16) / 4], and asuint reads it without changing a bit.
++struct MassEffectBlockVs { float4 v[256]; };
++struct MassEffectBlockPs { float4 v[256]; };  // banjo-nx: 256 (Nuts & Bolts reads up to c255)
++struct MassEffectSharedBlock { float4 v[35]; };  // banjo-nx: + bool constants, indexed fetch buffers, vertex index base
++[[vk::binding(0, 4)]] ConstantBuffer<MassEffectBlockVs> g_UboVertex;
++[[vk::binding(1, 4)]] ConstantBuffer<MassEffectBlockPs> g_UboPixel;
++[[vk::binding(2, 4)]] ConstantBuffer<MassEffectSharedBlock> g_UboShared;
++#define MASSEFFECT_UBO ((g_SpecConstants & SPEC_CONSTANT_CONSTANTS_UBO) != 0)
++#define MASSEFFECT_SHARED_UINT(B)  asuint(g_UboShared.v[(B) / 16][((B) % 16) / 4])
++#define MASSEFFECT_SHARED_FLOAT(B) g_UboShared.v[(B) / 16][((B) % 16) / 4]
++
++#define g_Booleans                 (MASSEFFECT_UBO ? MASSEFFECT_SHARED_UINT(256) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 256))
++// banjo-nx: all 256 bool constants (the 8 SHADER_CONSTANT_BOOL words, 0x4900..0x4907) at bytes 488..519 of the
++// shared block; bool N is bit N % 32 of word N / 32, as on the Xenos. Nuts & Bolts' shaders (most without a CTAB)
++// test bools anywhere in that range (pixel shaders up to b254), beyond g_Booleans' 16 bits per stage.
++#define g_BoolWord(I)              (MASSEFFECT_UBO ? MASSEFFECT_SHARED_UINT(488 + (I) * 4) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 488 + (I) * 4))
++#define BANJO_BOOL(A)              ((g_BoolWord((A) >> 5) >> ((A) & 31)) & 1)
++#define g_SwappedTexcoords         (MASSEFFECT_UBO ? MASSEFFECT_SHARED_UINT(260) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 260))
++#define g_HalfPixelOffset          (MASSEFFECT_UBO ? float2(MASSEFFECT_SHARED_FLOAT(264), MASSEFFECT_SHARED_FLOAT(268)) : vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 264))
++#define g_AlphaThreshold           (MASSEFFECT_UBO ? MASSEFFECT_SHARED_FLOAT(272) : vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 272))
++// MASSEFFECT: alpha test function (RB_COLORCONTROL.alpha_func): 0 never, 1 <, 2 ==, 3 <=,
++// 4 >, 5 !=, 6 >=, 7 always.
++#define g_AlphaFunction            (MASSEFFECT_UBO ? MASSEFFECT_SHARED_UINT(276) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 276))
++// MASSEFFECT: position to host clip space, like ndc_scale/ndc_offset in the
++// emulation (graphics/util/draw.cpp). (1, 1) and (0, 0) for normal draws;
++// with Xenos clipping disabled it converts from pixels to NDC.
++#define g_NdcScale                 (MASSEFFECT_UBO ? float2(MASSEFFECT_SHARED_FLOAT(280), MASSEFFECT_SHARED_FLOAT(284)) : vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 280))
++#define g_NdcOffset                (MASSEFFECT_UBO ? float2(MASSEFFECT_SHARED_FLOAT(288), MASSEFFECT_SHARED_FLOAT(292)) : vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 288))
++// MASSEFFECT: where each component of the vertex input at that location comes from
++// (D3D patches the fetch swizzle according to the declaration). 0xFFF = as is.
++#define g_InputRemap(LOC)          (MASSEFFECT_UBO ? MASSEFFECT_SHARED_UINT(296 + (LOC) * 4) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 296 + (LOC) * 4))
++// banjo-nx: SV_VertexID + this = the guest vertex index, which a Xenos vertex shader finds in r0.x (byte 544).
++#define g_VertexIndexBase          (MASSEFFECT_UBO ? MASSEFFECT_SHARED_UINT(544) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 544))
+ 
+ [[vk::constant_id(0)]] const uint g_SpecConstants = 0;
+ 
+ #define g_SpecConstants() g_SpecConstants
+ 
++// banjo-nx: vertex fetches indexed by a computed register (bone palettes; classifyVertexFetches in
++// shader_recompiler.cpp). The renderer uploads the buffer of each such fetch constant K (0..1) in host word order
++// and passes its device address at bytes 520 + 8K of the shared block and its size in words at bytes 536 + 4K.
++// Formats decode like the emulation's vertex fetch (graphics/pipeline/shader/spirv_translator_fetch.cpp).
++uint banjoVfetchWord(uint K, int dword)
++{
++    const uint2 address = MASSEFFECT_UBO ? uint2(MASSEFFECT_SHARED_UINT(520 + K * 8), MASSEFFECT_SHARED_UINT(524 + K * 8))
++                                         : vk::RawBufferLoad<uint2>(g_PushConstants.SharedConstants + 520 + K * 8, 8);
++    const uint words = MASSEFFECT_UBO ? MASSEFFECT_SHARED_UINT(536 + K * 4)
++                                      : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 536 + K * 4);
++    if (dword < 0 || uint(dword) >= words)
++        return 0;
++    return vk::RawBufferLoad<uint>(((uint64_t(address.y) << 32) | uint64_t(address.x)) + uint64_t(uint(dword)) * 4, 4);
++}
++
++float4 banjoVfetchPacked(uint4 values, uint4 widths, uint isSigned, uint isInteger)
++{
++    float4 result;
++    [unroll] for (uint i = 0; i < 4; i++)
++    {
++        const uint width = widths[i];
++        if (width == 0)
++        {
++            result[i] = i == 3 ? 1.0 : 0.0;
++            continue;
++        }
++        const uint value = values[i] & ((1u << width) - 1u);
++        if (isSigned != 0)
++        {
++            const int signedValue = int(value << (32 - width)) >> (32 - width);
++            result[i] = isInteger != 0 ? float(signedValue)
++                                       : max(float(signedValue) / float((1u << (width - 1)) - 1u), -1.0);
++        }
++        else
++        {
++            result[i] = isInteger != 0 ? float(value) : float(value) / float((1u << width) - 1u);
++        }
++    }
++    return result;
++}
++
++float4 banjoVfetch(uint K, int dword, uint format, uint isSigned, uint isInteger, int expAdjust)
++{
++    float4 result = float4(0.0, 0.0, 0.0, 1.0);
++    const uint w0 = banjoVfetchWord(K, dword);
++    switch (format)
++    {
++    case 6:   // k_8_8_8_8
++        result = banjoVfetchPacked(uint4(w0, w0 >> 8, w0 >> 16, w0 >> 24), uint4(8, 8, 8, 8), isSigned, isInteger);
++        break;
++    case 7:   // k_2_10_10_10
++        result = banjoVfetchPacked(uint4(w0, w0 >> 10, w0 >> 20, w0 >> 30), uint4(10, 10, 10, 2), isSigned, isInteger);
++        break;
++    case 16:  // k_10_11_11
++        result = banjoVfetchPacked(uint4(w0, w0 >> 11, w0 >> 22, 0), uint4(11, 11, 10, 0), isSigned, isInteger);
++        break;
++    case 17:  // k_11_11_10
++        result = banjoVfetchPacked(uint4(w0, w0 >> 10, w0 >> 21, 0), uint4(10, 11, 11, 0), isSigned, isInteger);
++        break;
++    case 25:  // k_16_16
++        result = banjoVfetchPacked(uint4(w0, w0 >> 16, 0, 0), uint4(16, 16, 0, 0), isSigned, isInteger);
++        break;
++    case 26:  // k_16_16_16_16
++    {
++        const uint w1 = banjoVfetchWord(K, dword + 1);
++        result = banjoVfetchPacked(uint4(w0, w0 >> 16, w1, w1 >> 16), uint4(16, 16, 16, 16), isSigned, isInteger);
++        break;
++    }
++    case 31:  // k_16_16_FLOAT
++        result.xy = f16tof32(uint2(w0, w0 >> 16));
++        return result;
++    case 32:  // k_16_16_16_16_FLOAT
++    {
++        const uint w1 = banjoVfetchWord(K, dword + 1);
++        result = f16tof32(uint4(w0, w0 >> 16, w1, w1 >> 16));
++        return result;
++    }
++    case 33:  // k_32
++    case 34:  // k_32_32
++    case 35:  // k_32_32_32_32
++    {
++        const uint count = format - 32;
++        [unroll] for (uint i = 0; i < 4; i++)
++        {
++            if (i >= count)
++                break;
++            const uint w = i == 0 ? w0 : banjoVfetchWord(K, dword + int(i));
++            float value = isSigned != 0 ? float(int(w)) : float(w);
++            if (isInteger == 0)
++                value = isSigned != 0 ? max(value / 2147483647.0, -1.0) : value / 4294967295.0;
++            result[i] = value;
++        }
++        break;
++    }
++    case 36:  // k_32_FLOAT
++        return float4(asfloat(w0), 0.0, 0.0, 1.0);
++    case 37:  // k_32_32_FLOAT
++        return float4(asfloat(w0), asfloat(banjoVfetchWord(K, dword + 1)), 0.0, 1.0);
++    case 57:  // k_32_32_32_FLOAT
++        return float4(asfloat(w0), asfloat(banjoVfetchWord(K, dword + 1)), asfloat(banjoVfetchWord(K, dword + 2)), 1.0);
++    case 38:  // k_32_32_32_32_FLOAT
++        return float4(asfloat(w0), asfloat(banjoVfetchWord(K, dword + 1)), asfloat(banjoVfetchWord(K, dword + 2)),
++                      asfloat(banjoVfetchWord(K, dword + 3)));
++    default:
++        break;
++    }
++    return expAdjust != 0 ? result * exp2(float(expAdjust)) : result;
++}
++
+ #else
+ 
+ #define DEFINE_SHARED_CONSTANTS() \
+     uint g_Booleans : packoffset(c16.x); \
+     uint g_SwappedTexcoords : packoffset(c16.y); \
+     float2 g_HalfPixelOffset : packoffset(c16.z); \
+-    float g_AlphaThreshold : packoffset(c17.x);
++    float g_AlphaThreshold : packoffset(c17.x); \
++    uint g_AlphaFunction : packoffset(c17.y); \
++    float2 g_NdcScale : packoffset(c17.z); \
++    float2 g_NdcOffset : packoffset(c18.x);
+ 
+ uint g_SpecConstants();
+ 
++#define g_InputRemap(LOC) 0xFFF
++#define BANJO_BOOL(A) 0
++#define g_VertexIndexBase 0u
++float4 banjoVfetch(uint K, int dword, uint format, uint isSigned, uint isInteger, int expAdjust) { return float4(0.0, 0.0, 0.0, 1.0); }
++
+ #endif
+ 
++
++// banjo-nx: the W of a MOVA's vector operand; the translator passes it already reduced by the write mask.
++float banjoMovaW(float v) { return v; }
++float banjoMovaW(float2 v) { return v.y; }
++float banjoMovaW(float3 v) { return v.z; }
++float banjoMovaW(float4 v) { return v.w; }
+ Texture2D<float4> g_Texture2DDescriptorHeap[] : register(t0, space0);
+ Texture3D<float4> g_Texture3DDescriptorHeap[] : register(t0, space1);
+ TextureCube<float4> g_TextureCubeDescriptorHeap[] : register(t0, space2);
+@@ -59,14 +249,79 @@ uint2 getTexture2DDimensions(Texture2D<float4> texture)
+     return dimensions;
+ }
+ 
+-float4 tfetch2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset)
++// The native renderer packs the four post-swizzle Xenos TextureSign values into bits 24-31 of the
++// descriptor index. Values: 0 unsigned, 1 signed (the renderer still warns for it), 2 unsigned biased,
++// 3 Xenos piecewise-linear gamma. Descriptor heaps use the low 24 bits.
++float masseffectGammaToLinear(float gamma)
++{
++    gamma = saturate(gamma);
++    float scale;
++    float offset;
++    if (gamma >= 96.0 / 255.0)
++    {
++        if (gamma >= 192.0 / 255.0) { scale = 8.0 / 1024.0; offset = -1024.0; }
++        else                         { scale = 4.0 / 1024.0; offset = -256.0; }
++    }
++    else
++    {
++        if (gamma >= 64.0 / 255.0) { scale = 2.0 / 1024.0; offset = -64.0; }
++        else                        { scale = 1.0 / 1024.0; offset = 0.0; }
++    }
++    float linearValue = gamma * ((255.0 * 1024.0) * scale) + offset;
++    linearValue += trunc(linearValue * scale);
++    return linearValue * (1.0 / 1023.0);
++}
++
++float4 masseffectApplyTextureSigns(float4 value, uint packedSigns)
+ {
++    // sa2-nx (sa2_gpu_no_texture_signs): the renderer sets the bit only when every texture of the draw has packed
++    // signs 0, which is the early return below: the test goes with it.
++    [branch] if (g_SpecConstants() & SPEC_CONSTANT_NO_TEXTURE_SIGNS)
++        return value;
++    // sa2-nx: no signed or gamma component (the usual case): one uniform branch (the signs come from the descriptor
++    // index, the same for the whole draw) instead of four extract/compare/select steps per fetch. The loop below
++    // changes nothing when packedSigns is 0, so the result is the same.
++    [branch] if (packedSigns == 0)
++        return value;
++    for (uint i = 0; i < 4; ++i)
++    {
++        uint sign = (packedSigns >> (i * 2)) & 3;
++        if (sign == 2)
++            value[i] = value[i] * 2.0 - 1.0;
++        else if (sign == 3)
++            value[i] = masseffectGammaToLinear(value[i]);
++    }
++    return value;
++}
++
++float4 tfetch2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset, float2 invSize)
++{
++    uint packedSigns = resourceDescriptorIndex >> 24;
++    resourceDescriptorIndex &= 0x00FFFFFF;
+     Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
+-    return texture.Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord + offset / getTexture2DDimensions(texture));
++    // With the bit set, the size comes from a constant and the texture does not have to be queried. It
++    // is the same computation with the same number: the renderer writes 1/size of the host image. With a
++    // ternary, DXC evaluates both branches and the size query stays: an if with [branch] is needed for
++    // the dead branch to disappear when the pipeline is specialized.
++    float2 displacement;
++    [branch] if (g_SpecConstants() & SPEC_CONSTANT_INV_TEX_SIZE)
++        displacement = offset * invSize;
++    else
++        displacement = offset / getTexture2DDimensions(texture);
++    return masseffectApplyTextureSigns(
++        texture.Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord + displacement), packedSigns);
++}
++
++// banjo-nx: a 1D texture is a row of the 2D heap (sN_Texture1DDescriptorIndex is the 2D index).
++float4 tfetch1D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float texCoord)
++{
++    Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
++    return texture.Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], float2(texCoord, 0.5));
+ }
+ 
+ float2 getWeights2D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset)
+ {
++    resourceDescriptorIndex &= 0x00FFFFFF;
+     Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
+     return select(isnan(texCoord), 0.0, frac(texCoord * getTexture2DDimensions(texture) + offset - 0.5));
+ }
+@@ -113,6 +368,8 @@ float h1(float a)
+ 
+ float4 tfetch2DBicubic(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float2 texCoord, float2 offset)
+ {
++    uint packedSigns = resourceDescriptorIndex >> 24;
++    resourceDescriptorIndex &= 0x00FFFFFF;
+     Texture2D<float4> texture = g_Texture2DDescriptorHeap[resourceDescriptorIndex];
+     SamplerState samplerState = g_SamplerDescriptorHeap[samplerDescriptorIndex];
+     uint2 dimensions = getTexture2DDimensions(texture);
+@@ -140,12 +397,16 @@ float4 tfetch2DBicubic(uint resourceDescriptorIndex, uint samplerDescriptorIndex
+         g1(fy) * (g0x * texture.Sample(samplerState, float2(px + h0x, py + h1y) / float2(dimensions)) +
+             g1x * texture.Sample(samplerState, float2(px + h1x, py + h1y) / float2(dimensions)));
+ 
+-    return r;
++    return masseffectApplyTextureSigns(r, packedSigns);
+ }
+ 
+ float4 tfetch3D(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord)
+ {
+-    return g_Texture3DDescriptorHeap[resourceDescriptorIndex].Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord);
++    uint packedSigns = resourceDescriptorIndex >> 24;
++    resourceDescriptorIndex &= 0x00FFFFFF;
++    return masseffectApplyTextureSigns(
++        g_Texture3DDescriptorHeap[resourceDescriptorIndex].Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], texCoord),
++        packedSigns);
+ }
+ 
+ struct CubeMapData
+@@ -156,7 +417,11 @@ struct CubeMapData
+ 
+ float4 tfetchCube(uint resourceDescriptorIndex, uint samplerDescriptorIndex, float3 texCoord, inout CubeMapData cubeMapData)
+ {
+-    return g_TextureCubeDescriptorHeap[resourceDescriptorIndex].Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeMapData.cubeMapDirections[texCoord.z]);
++    uint packedSigns = resourceDescriptorIndex >> 24;
++    resourceDescriptorIndex &= 0x00FFFFFF;
++    return masseffectApplyTextureSigns(
++        g_TextureCubeDescriptorHeap[resourceDescriptorIndex].Sample(g_SamplerDescriptorHeap[samplerDescriptorIndex], cubeMapData.cubeMapDirections[texCoord.z]),
++        packedSigns);
+ }
+ 
+ float4 tfetchR11G11B10(uint4 value)
+@@ -177,9 +442,62 @@ float4 tfetchR11G11B10(uint4 value)
+ 
+ float4 tfetchTexcoord(uint swappedTexcoords, float4 value, uint semanticIndex)
+ {
++    // sa2-nx (sa2_gpu_texcoords_unswapped): swappedTexcoords is always 0 in the native renderer.
++    [branch] if (g_SpecConstants() & SPEC_CONSTANT_TEXCOORDS_UNSWAPPED)
++        return value;
+     return (swappedTexcoords & (1ull << semanticIndex)) != 0 ? value.yxwz : value;
+ }
+ 
++// MASSEFFECT: 3 bits per component: 0-3 = data component, 4 = 0, 5 = 1, 7 = unchanged.
++// sa2-nx: one component of remapInput as a select chain: value[source] with a runtime index can be lowered to
++// scratch memory (local memory on Maxwell), the selects cannot. Same result: 0-3 pick a component, 4 is 0, 5 is 1,
++// 6 and 7 keep the original component.
++float masseffectRemapComponent(float4 value, float original, uint source)
++{
++    float result = original;
++    result = source == 0 ? value.x : result;
++    result = source == 1 ? value.y : result;
++    result = source == 2 ? value.z : result;
++    result = source == 3 ? value.w : result;
++    result = source == 4 ? 0.0 : result;
++    result = source == 5 ? 1.0 : result;
++    return result;
++}
++
++float4 remapInput(float4 value, uint code)
++{
++    // sa2-nx (sa2_gpu_identity_remap): set only when every code of the pipeline's vertex input is 0xFFF, the early
++    // return below.
++    [branch] if (g_SpecConstants() & SPEC_CONSTANT_IDENTITY_REMAP)
++        return value;
++    // The code comes from the shared constants (the same for the whole draw): a uniform branch.
++    [branch] if (code == 0xFFF)
++        return value;
++
++    return float4(masseffectRemapComponent(value, value.x, code & 7),
++                  masseffectRemapComponent(value, value.y, (code >> 3) & 7),
++                  masseffectRemapComponent(value, value.z, (code >> 6) & 7),
++                  masseffectRemapComponent(value, value.w, (code >> 9) & 7));
++}
++
++// MASSEFFECT: Xenos alpha test with its comparison function. Positive if the pixel passes.
++float alphaTestValue(float alpha)
++{
++    bool pass = true;
++    switch ((g_SpecConstants() & SPEC_CONSTANT_ALPHA_FUNC_MASK) >> SPEC_CONSTANT_ALPHA_FUNC_SHIFT)
++    {
++    case 0: pass = false; break;
++    case 1: pass = alpha < g_AlphaThreshold; break;
++    case 2: pass = alpha == g_AlphaThreshold; break;
++    case 3: pass = alpha <= g_AlphaThreshold; break;
++    case 4: pass = alpha > g_AlphaThreshold; break;
++    case 5: pass = alpha != g_AlphaThreshold; break;
++    case 6: pass = alpha >= g_AlphaThreshold; break;
++    default: break;
++    }
++    return pass ? 1.0 : -1.0;
++}
++
+ float4 cube(float4 value, inout CubeMapData cubeMapData)
+ {
+     uint index = cubeMapData.cubeMapIndex;
+@@ -206,6 +524,7 @@ float4 max4(float4 src0)
+ 
+ float2 getPixelCoord(uint resourceDescriptorIndex, float2 texCoord)
+ {
++    resourceDescriptorIndex &= 0x00FFFFFF;
+     return getTexture2DDimensions(g_Texture2DDescriptorHeap[resourceDescriptorIndex]) * texCoord;
+ }
+ 
+diff --git a/XenosRecomp/shader_recompiler.cpp b/XenosRecomp/shader_recompiler.cpp
+index 698a4189f877c386eff4ce4dd93ecc127b33a447..0bc52b4001623f2dcb84dff71f91d9aa80f232fa 100644
+--- a/XenosRecomp/shader_recompiler.cpp
++++ b/XenosRecomp/shader_recompiler.cpp
+@@ -1,5 +1,17 @@
+ #include "shader_recompiler.h"
+ #include "shader_common.h"
++#include <stdexcept>
++#include <cstdlib>
++#include <cstring>
++
++// Opt-in diagnostic arithmetic contract, not complete Shader Model 3 numeric
++// emulation: existing zero/denormal/NaN rules are deliberately unchanged.
++// VS-only; OFF must preserve the baseline generated source byte for byte.
++static bool precisePositionEnabled(bool isPixelShader)
++{
++    const char* value = std::getenv("MASSEFFECT_SHADER_PRECISE_POSITION");
++    return !isPixelShader && value && std::strcmp(value, "1") == 0;
++}
+ 
+ static constexpr char SWIZZLES[] = 
+ { 
+@@ -18,11 +30,11 @@ static constexpr const char* USAGE_TYPES[] =
+     "float4", // POSITION
+     "float4", // BLENDWEIGHT
+     "uint4", // BLENDINDICES
+-    "uint4", // NORMAL
++    "float4", // NORMAL: the renderer supplies them already converted to float
+     "float4", // PSIZE
+     "float4", // TEXCOORD
+-    "uint4", // TANGENT
+-    "uint4", // BINORMAL
++    "float4", // TANGENT
++    "float4", // BINORMAL
+     "float4", // TESSFACTOR
+     "float4", // POSITIONT
+     "float4", // COLOR
+@@ -116,6 +128,11 @@ static constexpr std::pair<DeclUsage, size_t> INTERPOLATORS[] =
+     { DeclUsage::TexCoord, 15 },
+     { DeclUsage::Color, 0 },
+     { DeclUsage::Color, 1 }
++    // MASSEFFECT: the game shaders declare and consume COLOR2..5.
++    , { DeclUsage::Color, 2 }
++    , { DeclUsage::Color, 3 }
++    , { DeclUsage::Color, 4 }
++    , { DeclUsage::Color, 5 }
+ };
+ 
+ static constexpr std::string_view TEXTURE_DIMENSIONS[] = 
+@@ -158,16 +175,61 @@ void ShaderRecompiler::printDstSwizzle01(uint32_t dstRegister, uint32_t dstSwizz
+     }
+ }
+ 
++static uint32_t banjoSlotLocation(uint32_t slot);  // banjo-nx, defined with classifyVertexFetches
++
++// sa2-nx: whether any destination component of a vertex fetch takes fetched data. Direct3D patches the swizzle of a
++// fetch whose element the vertex declaration lacks to constants only (0, 0, 0, 1); such a fetch reads nothing, and
++// printing it anyway gives "r1. = ....;", which does not compile.
++static bool dstSwizzleReadsFetch(uint32_t dstSwizzle)
++{
++    for (size_t i = 0; i < 4; i++)
++    {
++        const auto swizzle = getDestSwizzle(dstSwizzle, i);
++        if (swizzle >= FetchDestinationSwizzle::X && swizzle <= FetchDestinationSwizzle::W)
++            return true;
++    }
++    return false;
++}
++
+ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t address)
+ {
+     if (instr.isPredicated)
++        openPredicate(instr.predicateCondition);
++    else
++        closePredicate();
++    const size_t markPredicate = out.size();
++
++    if (auto indexed = indexedFetches.find(address); indexed != indexedFetches.end())
+     {
+-        indent();
+-        println("if ({}p0)", instr.predicateCondition ? "" : "!");
++        // banjo-nx: a fetch indexed by a computed register: read the fetch constant's buffer (see
++        // classifyVertexFetches). A full fetch computes the element index; its mini fetches reuse it.
++        if (!instr.isMiniFetch)
++        {
++            indent();
++            print("banjoVfetchIndex = int(floor(r{}.{}{})) * {};\n", instr.srcRegister,
++                SWIZZLES[instr.srcSwizzle & 0x3], instr.isIndexRounded ? " + 0.5" : "", uint32_t(instr.stride));
++        }
++        if (dstSwizzleReadsFetch(instr.dstSwizzle))
++        {
++            indent();
++            print("r{}.", instr.dstRegister);
++            printDstSwizzle(instr.dstSwizzle, false);
++            print(" = banjoVfetch({}, banjoVfetchIndex + {}, {}, {}, {}, {}).", indexed->second, int32_t(instr.offset),
++                uint32_t(instr.format), uint32_t(instr.formatCompAll), uint32_t(instr.numFormatAll), int32_t(instr.expAdjust));
++            printDstSwizzle(instr.dstSwizzle, true);
++            out += ";\n";
++        }
++        printDstSwizzle01(instr.dstRegister, instr.dstSwizzle);
++        closeIfWritesPredicate(markPredicate);
++        return;
++    }
+ 
+-        indent();
+-        out += "{\n";
+-        ++indentation;
++    if (!dstSwizzleReadsFetch(instr.dstSwizzle))
++    {
++        // sa2-nx: constants only (see dstSwizzleReadsFetch).
++        printDstSwizzle01(instr.dstRegister, instr.dstSwizzle);
++        closeIfWritesPredicate(markPredicate);
++        return;
+     }
+ 
+     indent();
+@@ -177,16 +239,44 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
+     out += " = ";
+ 
+     auto findResult = vertexElements.find(address);
+-    assert(findResult != vertexElements.end());
++    if (findResult == vertexElements.end() && linkByRegister)
++    {
++        // MASSEFFECT: a fetch Direct3D's own shader does not declare. Nothing binds a stream for it; the
++        // shaders seen (Direct3D startup objects) only export it to an interpolator no pixel shader reads.
++        out += "0.0;\n";
++        printDstSwizzle01(instr.dstRegister, instr.dstSwizzle);
++        closeIfWritesPredicate(markPredicate);
++        return;
++    }
++    if (findResult == vertexElements.end())
++    {
++        std::string declared;
++        for (auto& [addr, element] : vertexElements)
++            declared += fmt::format(" {}:{}{}", addr, uint32_t(element.usage), uint32_t(element.usageIndex));
++        throw std::runtime_error(fmt::format("vertex FETCH without a declared element (address {}, declared{})", address, declared));
++    }
++
++    // MASSEFFECT: D3D patches the fetch swizzle according to the vertex declaration; the
++    // native renderer passes the mapping through g_InputRemap.
++    int32_t remapLocation = -1;
++    if (linkByRegister && findResult->second.usage == DeclUsage::TexCoord)
++        remapLocation = int32_t(banjoSlotLocation(uint32_t(findResult->second.usageIndex)));
++    else
++    for (auto& usageLocation : USAGE_LOCATIONS)
++    {
++        if (usageLocation.usage == findResult->second.usage && usageLocation.usageIndex == findResult->second.usageIndex)
++        {
++            remapLocation = int32_t(usageLocation.location);
++            break;
++        }
++    }
++    if (remapLocation >= 0)
++        out += "remapInput(float4(";
+ 
+     switch (findResult->second.usage)
+     {
+-    case DeclUsage::Normal:
+-    case DeclUsage::Tangent:
+-    case DeclUsage::Binormal:
+-        specConstantsMask |= SPEC_CONSTANT_R11G11B10_NORMAL;
+-        print("tfetchR11G11B10(");
+-        break;
++    // MASSEFFECT declares normals, tangents and binormals as float4 (USAGE_TYPES): the
++    // native renderer supplies them already normalized through the Vulkan format.
+ 
+     case DeclUsage::TexCoord:
+         print("tfetchTexcoord(g_SwappedTexcoords, ");
+@@ -197,17 +287,15 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
+ 
+     switch (findResult->second.usage)
+     {
+-    case DeclUsage::Normal:
+-    case DeclUsage::Tangent:
+-    case DeclUsage::Binormal:
+-        out += ')';
+-        break;
+ 
+     case DeclUsage::TexCoord:
+         print(", {})", uint32_t(findResult->second.usageIndex));
+         break;
+     }
+ 
++    if (remapLocation >= 0)
++        print("), g_InputRemap({}))", remapLocation);
++
+     out += '.';
+     printDstSwizzle(instr.dstSwizzle, true);
+ 
+@@ -215,12 +303,7 @@ void ShaderRecompiler::recompile(const VertexFetchInstruction& instr, uint32_t a
+ 
+     printDstSwizzle01(instr.dstRegister, instr.dstSwizzle);
+ 
+-    if (instr.isPredicated)
+-    {
+-        --indentation;
+-        indent();
+-        out += "}\n";
+-    }
++    closeIfWritesPredicate(markPredicate);
+ }
+ 
+ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicubic)
+@@ -229,14 +312,10 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+         return;
+ 
+     if (instr.isPredicated)
+-    {
+-        indent();
+-        println("if ({}p0)", instr.predCondition ? "" : "!");
+-
+-        indent();
+-        out += "{\n";
+-        ++indentation;
+-    }
++        openPredicate(instr.predCondition);
++    else
++        closePredicate();
++    const size_t markPredicate = out.size();
+ 
+     auto printSrcRegister = [&](size_t componentCount)
+         {
+@@ -337,7 +416,8 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+     switch (instr.dimension)
+     {
+     case TextureDimension::Texture2D:
+-        print(", float2({}, {})", instr.offsetX * 0.5f, instr.offsetY * 0.5f);
++        // The last argument is 1/size of the slot, so the texture does not have to be queried.
++        print(", float2({}, {}), {}_InvSize", instr.offsetX * 0.5f, instr.offsetY * 0.5f, constNamePtr);
+         break;
+     case TextureDimension::TextureCube:
+         out += ", cubeMapData";
+@@ -352,25 +432,17 @@ void ShaderRecompiler::recompile(const TextureFetchInstruction& instr, bool bicu
+ 
+     printDstSwizzle01(instr.dstRegister, instr.dstSwizzle);
+ 
+-    if (instr.isPredicated)
+-    {
+-        --indentation;
+-        indent();
+-        out += "}\n";
+-    }
++    closeIfWritesPredicate(markPredicate);
+ }
+ 
+ void ShaderRecompiler::recompile(const AluInstruction& instr)
+ {
++    const bool precisePosition = precisePositionEnabled(isPixelShader);
+     if (instr.isPredicated)
+-    {
+-        indent();
+-        println("if ({}p0)", instr.predicateCondition ? "" : "!");
+-
+-        indent(); 
+-        out += "{\n";
+-        ++indentation;
+-    }
++        openPredicate(instr.predicateCondition);
++    else
++        closePredicate();
++    const size_t markPredicate = out.size();
+ 
+     enum
+     {
+@@ -383,8 +455,12 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+         SCALAR_CONSTANT_1
+     };
+ 
++    std::string scalarOperandOverrides[7];
++    bool forceFullMask = false;  // banjo-nx: MaxA reads src0.w whatever the write mask
+     auto op = [&](size_t operand)
+         {
++            if (!scalarOperandOverrides[operand].empty())
++                return scalarOperandOverrides[operand];
+             size_t reg = 0;
+             size_t swizzle = 0;
+             bool select = true;
+@@ -455,6 +531,11 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+             }
+             else
+             {
++                // The bits correspond to the first constant and the following ones,
++                // not to the whole instruction. Temporary operands do not count.
++                const bool relative = operand == VECTOR_0 ? instr.const0Relative :
++                    operand == VECTOR_1 ? (instr.src1Select ? instr.const0Relative : instr.const1Relative) :
++                    (instr.src1Select && instr.src2Select ? instr.const0Relative : instr.const1Relative);
+                 auto findResult = float4Constants.find(reg);
+                 if (findResult != float4Constants.end())
+                 {
+@@ -471,19 +552,33 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+                     #endif
+                         {
+                             regFormatted = fmt::format("{}({}{})", constantName,
+-                                reg - findResult->second->registerIndex, instr.const0Relative ? (instr.constAddressRegisterRelative ? " + a0" : " + aL") : "");
++                                reg - findResult->second->registerIndex, relative ? (instr.constAddressRegisterRelative ? " + a0" : " + aL") : "");
+                         }
+                     }
+                     else
+                     {
+-                        assert(!instr.const0Relative && !instr.const1Relative);
++                        if (relative)
++                            throw std::runtime_error("relative addressing of a scalar constant is pending");
+                         regFormatted = constantName;
+                     }
+                 }
+                 else
+                 {
+-                    assert(!instr.const0Relative && !instr.const1Relative);
+-                    regFormatted = fmt::format("c{}", reg);
++                    // MASSEFFECT: shaders without a constant table (Direct3D's own) read registers
++                    // that no name covers: straight from the constant buffer, like the named ones.
++                    // banjo-nx: relative addressing (skinning palettes, c[a0 + N]) indexes the same buffer, clamped
++                    // to its 256 registers (literal definitions are not reachable that way).
++                    if (relative)
++                    {
++                        const char* offsetRegister = instr.constAddressRegisterRelative ? "a0" : "aL";
++                        regFormatted = fmt::format("(MASSEFFECT_UBO ? g_Ubo{0}.v[min(uint({1} + {2}), 255u)] : vk::RawBufferLoad<float4>(g_PushConstants.{0}ShaderConstants + min(uint({1} + {2}), 255u) * 16, 0x10))",
++                            isPixelShader ? "Pixel" : "Vertex", reg, offsetRegister);
++                    }
++                    else if (literalFloat4.count(reg))
++                        regFormatted = fmt::format("c{}", reg);
++                    else
++                        regFormatted = fmt::format("(MASSEFFECT_UBO ? g_Ubo{0}.v[{1}] : vk::RawBufferLoad<float4>(g_PushConstants.{0}ShaderConstants + {2}, 0x10))",
++                            isPixelShader ? "Pixel" : "Vertex", reg, reg * 16);
+                 }
+             }
+ 
+@@ -522,7 +617,7 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+                     break;
+ 
+                 default:
+-                    mask = instr.vectorWriteMask != 0 ? instr.vectorWriteMask : 0b1;
++                    mask = forceFullMask ? 0b1111 : instr.vectorWriteMask != 0 ? instr.vectorWriteMask : 0b1;
+                     break;
+                 }
+ 
+@@ -597,7 +692,7 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+                 exportRegister = "oC3";
+                 break;           
+             case ExportRegister::PSDepth:
+-                exportRegister = "oDepth";
++                exportRegister = "oDepth4";  // banjo-nx: the X of the export is the depth (see shouldReturn)
+                 break;
+             }
+         }
+@@ -626,7 +721,21 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+             default:
+             {
+                 auto findResult = interpolators.find(instr.vectorDest);
+-                assert(findResult != interpolators.end());
++                // banjo-nx: export 63 (point size / edge flag / kill vertex) and the memory export registers
++                // 32..37 (eA, eM0..4; memexport is not emulated) have no interpolator: written to a dead local.
++                if (findResult == interpolators.end() && (instr.vectorDest == 63 ||
++                    (instr.vectorDest >= 32 && instr.vectorDest <= 37)))
++                {
++                    exportRegister = "oUnused";
++                    break;
++                }
++                if (findResult == interpolators.end())
++                    {
++                    std::string declared;
++                    for (auto& [register_value, name] : interpolators)
++                        declared += fmt::format(" {}:{}", register_value, name);
++                    throw std::runtime_error(fmt::format("vertex export without a declared interpolator (register {}, declared{})", uint32_t(instr.vectorDest), declared));
++                }
+                 exportRegister = findResult->second;
+                 break;
+             }
+@@ -657,16 +766,86 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+ 
+         out += " 0.0;\n";
+     }
+-    else if (instr.vectorOpcode >= AluVectorOpcode::MaxA)
++    bool setsA0 = false;
++    if (!(instr.vectorOpcode >= AluVectorOpcode::SetpEqPush && instr.vectorOpcode <= AluVectorOpcode::SetpGePush) &&
++        instr.vectorOpcode >= AluVectorOpcode::MaxA)
+     {
++        // banjo-nx: a0 comes from src0.w (all four lanes, not the write-mask lanes). Like the emulation, the vector
++        // operands of this instruction still read the old a0; the new one is visible from the scalar operation on.
++        forceFullMask = true;
++        const std::string source = op(VECTOR_0);
++        forceFullMask = false;
+         indent();
+-        println("a0 = (int)clamp(floor(({}).w + 0.5), -256.0, 255.0);", op(VECTOR_0));
++        println("banjoNextA0 = (int)clamp(floor(({}).w + 0.5), -256.0, 255.0);", source);
++        setsA0 = true;
+     }
+ 
+     uint32_t vectorWriteMask = instr.vectorWriteMask;
+     if (instr.exportData)
+         vectorWriteMask &= ~instr.scalarWriteMask;
+ 
++    bool scalarSnapshotScope = false;
++    // Xenos computes scalar operands before committing vector TEMP results, but
++    // after vector a0/p0 effects. Preserve only genuinely overlapping TEMP lanes;
++    // relative constants must still observe the new vector a0, not an old snapshot.
++    if (!instr.exportData && vectorWriteMask != 0)
++    {
++        bool used[7]{};
++        switch (instr.scalarOpcode)
++        {
++        case AluScalarOpcode::Adds: case AluScalarOpcode::Muls:
++        case AluScalarOpcode::Maxs: case AluScalarOpcode::Mins:
++        case AluScalarOpcode::MaxAs: case AluScalarOpcode::MaxAsf:
++        case AluScalarOpcode::Subs:
++            used[SCALAR_0] = used[SCALAR_1] = true;
++            break;
++        case AluScalarOpcode::Mulsc0: case AluScalarOpcode::Mulsc1:
++        case AluScalarOpcode::Addsc0: case AluScalarOpcode::Addsc1:
++        case AluScalarOpcode::Subsc0: case AluScalarOpcode::Subsc1:
++            used[SCALAR_CONSTANT_1] = true;
++            break;
++        case AluScalarOpcode::SetpClr: case AluScalarOpcode::RetainPrev:
++            break;
++        default:
++            used[SCALAR_0] = uint32_t(instr.scalarOpcode) <= 40 ||
++                instr.scalarOpcode == AluScalarOpcode::Sin ||
++                instr.scalarOpcode == AluScalarOpcode::Cos;
++            break;
++        }
++        std::string capturedExpressions[7];
++        for (size_t operand = SCALAR_0; operand <= SCALAR_CONSTANT_1; ++operand)
++        {
++            if (!used[operand]) continue;
++            const bool special = operand == SCALAR_CONSTANT_1;
++            if (!special && !instr.src3Select) continue;
++            const uint32_t reg = special ? ((uint32_t(instr.scalarOpcode) & 1) |
++                (instr.src3Select << 1) | (instr.src3Swizzle & 0x3C)) :
++                (instr.src3Register & 0x3F);
++            const uint32_t lane = operand == SCALAR_0 ?
++                (((instr.src3Swizzle >> 6) + 3) & 3) : (instr.src3Swizzle & 3);
++            if (reg != instr.vectorDest || !(vectorWriteMask & (1u << lane))) continue;
++            const std::string expression = op(operand);
++            for (size_t prior = SCALAR_0; prior < operand; ++prior)
++                if (capturedExpressions[prior] == expression)
++                    scalarOperandOverrides[operand] = scalarOperandOverrides[prior];
++            if (!scalarOperandOverrides[operand].empty()) continue;
++            capturedExpressions[operand] = expression;
++            scalarOperandOverrides[operand] = fmt::format("me_alu_scalar_{}_{}", markPredicate, operand);
++            // CF is emitted as switch cases. Initialized locals must not extend
++            // to the next label, which DXC correctly rejects as a bypassed init.
++            if (!scalarSnapshotScope)
++            {
++                indent();
++                out += "{\n";
++                ++indentation;
++                scalarSnapshotScope = true;
++            }
++            indent();
++            println("{}float {} = {};", precisePosition ? "precise " : "",
++                    scalarOperandOverrides[operand], expression);
++        }
++    }
++
+     if (vectorWriteMask != 0)
+     {
+         indent();
+@@ -701,14 +880,31 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+             print("{} * {}", op(VECTOR_0), op(VECTOR_1));
+             break;
+ 
++        /*
++         * The Xenos MOV is a max with itself.
++         *
++         * The Xenos has no copy instruction: the assembler writes it as MAX dst, src, src
++         * (and MAXs for the scalar channel). The translator emitted it as is, so the library
++         * had 452 `max(a, a)` in the pixel shaders and 482 in the vertex shaders: almost a
++         * thousand operations that are a copy. max(a, a) == a exactly (also with NaN and with
++         * both zeros, which is the only thing that sets IEEE min/max apart), so the operand is
++         * emitted directly.
++         *
++         * The `a0 = ...` of MaxA/MaxAs/MaxAsf is not touched: it is handled separately and
++         * stays the same.
++         */
+         case AluVectorOpcode::Max:
+         case AluVectorOpcode::MaxA:
+-            print("max({}, {})", op(VECTOR_0), op(VECTOR_1));
+-            break;
+-
+         case AluVectorOpcode::Min:
+-            print("min({}, {})", op(VECTOR_0), op(VECTOR_1));
++        {
++            std::string a = op(VECTOR_0);
++            std::string b = op(VECTOR_1);
++            if (a == b)
++                out += a;
++            else
++                print("{}({}, {})", instr.vectorOpcode == AluVectorOpcode::Min ? "min" : "max", a, b);
+             break;
++        }
+ 
+         case AluVectorOpcode::Seq:
+             print("{} == {}", op(VECTOR_0), op(VECTOR_1));
+@@ -756,11 +952,26 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+ 
+         case AluVectorOpcode::Dp4:
+         case AluVectorOpcode::Dp3:
+-            print("dot({}, {})", op(VECTOR_0), op(VECTOR_1));
++            if (precisePosition)
++            {
++                const std::string a = op(VECTOR_0), b = op(VECTOR_1);
++                const uint32_t count = instr.vectorOpcode == AluVectorOpcode::Dp4 ? 4 : 3;
++                std::string sum = fmt::format("(({}).x * ({}).x)", a, b);
++                for (uint32_t component = 1; component < count; ++component)
++                    sum = fmt::format("({} + (({}).{} * ({}).{}))", sum, a,
++                                      SWIZZLES[component], b, SWIZZLES[component]);
++                out += sum;
++            }
++            else print("dot({}, {})", op(VECTOR_0), op(VECTOR_1));
+             break;
+ 
+         case AluVectorOpcode::Dp2Add:
+-            print("dot({}, {}) + {}", op(VECTOR_0), op(VECTOR_1), op(VECTOR_2));
++            if (precisePosition)
++            {
++                const std::string a = op(VECTOR_0), b = op(VECTOR_1);
++                print("(((({}).x * ({}).x) + (({}).y * ({}).y)) + ({}))", a, b, a, b, op(VECTOR_2));
++            }
++            else print("dot({}, {}) + {}", op(VECTOR_0), op(VECTOR_1), op(VECTOR_2));
+             break;
+ 
+         case AluVectorOpcode::Cube:
+@@ -805,6 +1016,12 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+         out += ";\n";
+     }
+ 
++    if (setsA0)
++    {
++        indent();
++        out += "a0 = banjoNextA0;\n";
++    }
++
+     if (instr.scalarOpcode != AluScalarOpcode::RetainPrev)
+     {
+         if (instr.scalarOpcode >= AluScalarOpcode::SetpEq && instr.scalarOpcode <= AluScalarOpcode::SetpRstr)
+@@ -874,15 +1091,20 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+             print("{} * ps", op(SCALAR_0));
+             break;
+ 
++        // Same as above, for the scalar channel: MAXs dst, src, src is the Xenos MOV.
+         case AluScalarOpcode::Maxs:
+         case AluScalarOpcode::MaxAs:
+         case AluScalarOpcode::MaxAsf:
+-            print("max({}, {})", op(SCALAR_0), op(SCALAR_1));
+-            break;
+-
+         case AluScalarOpcode::Mins:
+-            print("min({}, {})", op(SCALAR_0), op(SCALAR_1));
++        {
++            std::string a = op(SCALAR_0);
++            std::string b = op(SCALAR_1);
++            if (a == b)
++                out += a;
++            else
++                print("{}({}, {})", instr.scalarOpcode == AluScalarOpcode::Mins ? "min" : "max", a, b);
+             break;
++        }
+ 
+         case AluScalarOpcode::Seqs:
+             print("{} == 0.0", op(SCALAR_0));
+@@ -949,7 +1171,9 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+             break;
+ 
+         case AluScalarOpcode::SetpInv:
+-            print("{0} == 0.0 ? 1.0 : {0}", op(SCALAR_0));
++            // Xenos: with src == 1 the counter goes back to 0 (Xenia's ucode.h, kSetpInv). Without that
++            // case the counter stayed at 1 and later p0 blocks did not run.
++            print("p0 ? 0.0 : ({0} == 0.0 ? 1.0 : {0})", op(SCALAR_0));
+             break;
+ 
+         case AluScalarOpcode::SetpPop:
+@@ -1083,35 +1307,411 @@ void ShaderRecompiler::recompile(const AluInstruction& instr)
+         out += "clip(ps != 0.0 ? -1 : 1);\n";
+     }
+ 
+-    if (closeIfBracket)
++    if (scalarSnapshotScope)
+     {
+         --indentation;
+         indent();
+         out += "}\n";
+     }
+ 
+-    if (instr.isPredicated)
++    if (closeIfBracket)
+     {
+         --indentation;
+         indent();
+         out += "}\n";
+     }
++
++    closeIfWritesPredicate(markPredicate);
++}
++
++// MASSEFFECT: the full vertex fetches of a microcode (instruction index, destination register), walking the
++// exec clauses of the control flow. Same walk as app/src/me/native/sa2_native_shaders.cpp
++// FetchesOfVertices: Direct3D's own vertex shaders are linked by fetch destination register.
++static std::vector<std::pair<uint32_t, uint32_t>> vertexFetchesByRegister(const std::vector<uint32_t>& w)
++{
++    std::vector<std::pair<uint32_t, uint32_t>> fetches;
++    uint32_t end = uint32_t(w.size() / 3);
++    for (uint32_t pair = 0; pair < end && pair * 3 + 2 < w.size(); pair++)
++    {
++        const uint64_t cf[2] = {
++            uint64_t(w[pair * 3]) | (uint64_t(w[pair * 3 + 1] & 0xFFFF) << 32),
++            uint64_t(w[pair * 3 + 1] >> 16) | (uint64_t(w[pair * 3 + 2]) << 16) };
++        for (uint64_t c : cf)
++        {
++            const uint32_t opcode = uint32_t(c >> 44) & 0xF;
++            const bool exec = (opcode >= 1 && opcode <= 6) || opcode == 13 || opcode == 14;
++            if (!exec)
++                continue;
++            const uint32_t address = uint32_t(c) & 0xFFF, count = uint32_t(c >> 12) & 0x7;
++            const uint32_t sequence = uint32_t(c >> 16) & 0xFFF;
++            if (address != 0)
++                end = std::min(end, address);
++            for (uint32_t i = 0; i < count; i++)
++            {
++                const uint32_t index = address + i;
++                if (!((sequence >> (i * 2)) & 0x1) || index * 3 + 2 >= w.size())
++                    continue;
++                const uint32_t d0 = w[index * 3], d1 = w[index * 3 + 1];
++                if ((d0 & 0x1F) == 0)
++                    fetches.emplace_back(index, (d0 >> 12) & 0x3F);
++            }
++        }
++    }
++    return fetches;
++}
++
++// banjo-nx: whether r0.x still holds the vertex index at each full vertex fetch. A Xenos vertex shader starts with
++// the vertex index in r0.x; Nuts & Bolts' instanced shaders overwrite r0 (e.g. r0 = floor(index * c132.x), the
++// instance) before fetching "by r0.x", which then fetches by that computed index, not per vertex. Walks the exec
++// clauses in control-flow order; any ALU or fetch write to r0.x (predicated or not) ends the vertex index.
++static std::unordered_set<uint32_t> vertexFetchesAfterR0Write(const std::vector<uint32_t>& w)
++{
++    std::unordered_set<uint32_t> after;
++    bool written = false;
++    uint32_t end = uint32_t(w.size() / 3);
++    for (uint32_t pair = 0; pair < end && pair * 3 + 2 < w.size(); pair++)
++    {
++        const uint64_t cf[2] = {
++            uint64_t(w[pair * 3]) | (uint64_t(w[pair * 3 + 1] & 0xFFFF) << 32),
++            uint64_t(w[pair * 3 + 1] >> 16) | (uint64_t(w[pair * 3 + 2]) << 16) };
++        for (uint64_t c : cf)
++        {
++            const uint32_t opcode = uint32_t(c >> 44) & 0xF;
++            if (!((opcode >= 1 && opcode <= 6) || opcode == 13 || opcode == 14))
++                continue;
++            const uint32_t address = uint32_t(c) & 0xFFF, count = uint32_t(c >> 12) & 0x7;
++            const uint32_t sequence = uint32_t(c >> 16) & 0xFFF;
++            if (address != 0)
++                end = std::min(end, address);
++            for (uint32_t i = 0; i < count; i++)
++            {
++                const uint32_t index = address + i;
++                if (index * 3 + 2 >= w.size())
++                    continue;
++                const uint32_t w0 = w[index * 3], w1 = w[index * 3 + 1];
++                if ((sequence >> (i * 2)) & 0x1)
++                {
++                    if ((w0 & 0x1F) == 0 && written)
++                        after.insert(index);  // a vertex fetch after r0.x stopped being the vertex index
++                    // Any fetch (vertex or texture) into r0 that writes its x lane (dst swizzle 7 = keep).
++                    if (((w0 >> 12) & 0x3F) == 0 && !((w0 >> 18) & 0x1) && (w1 & 0x7) != 7)
++                        written = true;
++                }
++                else if (!((w0 >> 15) & 0x1))  // ALU, not an export
++                {
++                    if ((w0 & 0x3F) == 0 && !((w0 >> 6) & 0x1) && ((w0 >> 16) & 0x1))
++                        written = true;  // vector result into r0.x
++                    if (((w0 >> 8) & 0x3F) == 0 && !((w0 >> 14) & 0x1) && ((w0 >> 20) & 0x1))
++                        written = true;  // scalar result into r0.x
++                }
++            }
++        }
++    }
++    return after;
++}
++
++// banjo-nx: the full vertex fetches of a register-linked vertex shader, split in two:
++//   - attributes: indexed by the vertex index (r0.x as the shader starts), one vertex input each. Input slot =
++//     the destination register; a register fetched twice takes the lowest slot (0..15) no attribute register uses.
++//     A mini fetch belongs to the full fetch before it.
++//   - indexed: indexed by a computed register (bone matrices read by blend index); read from the buffer of their
++//     fetch constant in the shader (banjoVfetch). Up to 2 distinct fetch constants.
++// The native renderer applies the same rule (masseffect_native_shaders.cpp, ClassifyVertexFetches).
++struct BanjoVertexFetchSplit
++{
++    std::vector<std::pair<uint32_t, uint32_t>> attributes;  // (instruction index, input slot)
++    std::unordered_map<uint32_t, uint32_t> indexed;         // instruction index -> indexed buffer number
++    std::vector<uint32_t> indexedConstants;                 // per indexed buffer number: vertex fetch constant 0..95
++};
++
++static BanjoVertexFetchSplit classifyVertexFetches(const std::vector<uint32_t>& w)
++{
++    BanjoVertexFetchSplit split;
++    std::vector<std::pair<uint32_t, uint32_t>> attributeRegisters;
++    bool lastFullIsAttribute = true;
++    uint32_t lastFullBuffer = 0;
++    const auto afterR0Write = vertexFetchesAfterR0Write(w);
++    for (auto& [index, reg] : vertexFetchesByRegister(w))
++    {
++        const uint32_t d0 = w[index * 3], d1 = w[index * 3 + 1];
++        const bool mini = (d1 >> 30) & 0x1;
++        if (!mini)
++        {
++            const uint32_t src = (d0 >> 5) & 0x3F, srcRelative = (d0 >> 11) & 0x1, srcSwizzle = (d0 >> 30) & 0x3;
++            lastFullIsAttribute = src == 0 && !srcRelative && srcSwizzle == 0 && !afterR0Write.count(index);
++            if (!lastFullIsAttribute)
++            {
++                const uint32_t constant = ((d0 >> 20) & 0x1F) * 3 + ((d0 >> 25) & 0x3);
++                auto it = std::find(split.indexedConstants.begin(), split.indexedConstants.end(), constant);
++                lastFullBuffer = uint32_t(it - split.indexedConstants.begin());
++                if (it == split.indexedConstants.end())
++                {
++                    if (split.indexedConstants.size() >= 2)
++                        throw std::runtime_error("more than 2 indexed vertex fetch constants");
++                    split.indexedConstants.push_back(constant);
++                }
++            }
++        }
++        if (lastFullIsAttribute)
++            attributeRegisters.emplace_back(index, reg);
++        else
++            split.indexed.emplace(index, lastFullBuffer);
++    }
++    uint32_t registersUsed = 0;
++    for (auto& [index, reg] : attributeRegisters)
++    {
++        if (reg >= 16)
++            throw std::runtime_error("vertex fetch to a register without a location (>= r16)");
++        registersUsed |= 1u << reg;
++    }
++    uint32_t slotsTaken = 0;
++    for (auto& [index, reg] : attributeRegisters)
++    {
++        uint32_t slot = reg;
++        if (slotsTaken & (1u << slot))
++        {
++            slot = 0;
++            while (slot < 16 && ((registersUsed | slotsTaken) & (1u << slot)))
++                slot++;
++            if (slot >= 16)
++                throw std::runtime_error("no free vertex input slot for a repeated fetch register");
++        }
++        slotsTaken |= 1u << slot;
++        split.attributes.emplace_back(index, slot);
++    }
++    return split;
++}
++
++// banjo-nx: Vulkan location of input slot N of a register-linked vertex shader (TEXCOORDN). Slots 0..7 keep
++// USAGE_LOCATIONS' texcoord locations; 8..15 take the locations of the usages these shaders never declare.
++static uint32_t banjoSlotLocation(uint32_t slot)
++{
++    return slot < 4 ? 4 + slot : slot < 8 ? 12 + (slot - 4) : slot < 12 ? slot - 8 : 8 + (slot - 12);
++}
++
++/*
++ * sa2-nx GPU round 2 (sa2_gpu_index_base_held): whether a vertex shader can read the value r0 starts with (the guest
++ * vertex index, SV_VertexID + g_VertexIndexBase), walking its microcode in control flow order:
++ *  - any read of r0 by an ALU, texture fetch or indexed vertex fetch instruction counts, whatever the component,
++ *    except the Xenos zero idiom: the scalar SETGT of -|r0| (`-abs(r0.c) > 0.0`) is 0 for every value, NaN included;
++ *  - the answer is "no" once r0.x is overwritten by an instruction that surely runs (not predicated, in a plain EXEC
++ *    before any jump, loop or conditional EXEC), or when the shader surely ends before any read.
++ * Everything else is "it may": conditional code, relative addressing or an unknown construct keep the index.
++ * SA2's lighting vertex shaders read r0 only through the zero idiom before `r0.x = dot(...)`, so their r0 starts at 0
++ * and their SPIR-V never loads the vertex index; the renderer then holds g_VertexIndexBase (and with it the whole
++ * shared constant block) from one draw to the next.
++ */
++static bool vertexIndexMayBeRead(const be<uint32_t>* code, uint32_t shaderSize,
++                                 const std::unordered_map<uint32_t, uint32_t>& indexedFetches)
++{
++    union { ControlFlowInstruction controlFlow[2]; struct { uint32_t code0, code1, code2, code3; } w; } cfu;
++    uint32_t instrSize = shaderSize;
++    // Pass 1: where the instructions start (the first EXEC address), as the translator's own scan finds it.
++    for (uint32_t at = 0, word = 0; at < instrSize; at += 12, word += 3)
++    {
++        cfu.w.code0 = code[word];
++        cfu.w.code1 = code[word + 1] & 0xFFFF;
++        cfu.w.code2 = (code[word + 1] >> 16) | (code[word + 2] << 16);
++        cfu.w.code3 = code[word + 2] >> 16;
++        for (auto& cf : cfu.controlFlow)
++        {
++            uint32_t address = 0;
++            switch (cf.opcode)
++            {
++            case ControlFlowOpcode::Exec:
++            case ControlFlowOpcode::ExecEnd:
++                address = cf.exec.address;
++                break;
++            case ControlFlowOpcode::CondExec:
++            case ControlFlowOpcode::CondExecEnd:
++            case ControlFlowOpcode::CondExecPredClean:
++            case ControlFlowOpcode::CondExecPredCleanEnd:
++                address = cf.condExec.address;
++                break;
++            case ControlFlowOpcode::CondExecPred:
++            case ControlFlowOpcode::CondExecPredEnd:
++                address = cf.condExecPred.address;
++                break;
++            default:
++                break;
++            }
++            if (address != 0)
++                instrSize = std::min<uint32_t>(instrSize, address * 12);
++        }
++    }
++    bool uncertain = false;  // past a jump, loop or conditional EXEC: writes no longer surely run
++    for (uint32_t at = 0, word = 0; at < instrSize; at += 12, word += 3)
++    {
++        cfu.w.code0 = code[word];
++        cfu.w.code1 = code[word + 1] & 0xFFFF;
++        cfu.w.code2 = (code[word + 1] >> 16) | (code[word + 2] << 16);
++        cfu.w.code3 = code[word + 2] >> 16;
++        for (auto& cf : cfu.controlFlow)
++        {
++            uint32_t address = 0, count = 0, sequence = 0;
++            bool conditional = uncertain, ends = false;
++            switch (cf.opcode)
++            {
++            case ControlFlowOpcode::Exec:
++            case ControlFlowOpcode::ExecEnd:
++                address = cf.exec.address;
++                count = cf.exec.count;
++                sequence = cf.exec.sequence;
++                ends = cf.opcode == ControlFlowOpcode::ExecEnd;
++                break;
++            case ControlFlowOpcode::CondExec:
++            case ControlFlowOpcode::CondExecEnd:
++            case ControlFlowOpcode::CondExecPredClean:
++            case ControlFlowOpcode::CondExecPredCleanEnd:
++                address = cf.condExec.address;
++                count = cf.condExec.count;
++                sequence = cf.condExec.sequence;
++                conditional = true;
++                break;
++            case ControlFlowOpcode::CondExecPred:
++            case ControlFlowOpcode::CondExecPredEnd:
++                address = cf.condExecPred.address;
++                count = cf.condExecPred.count;
++                sequence = cf.condExecPred.sequence;
++                conditional = true;
++                break;
++            case ControlFlowOpcode::CondJmp:
++            case ControlFlowOpcode::LoopStart:
++            case ControlFlowOpcode::LoopEnd:
++                uncertain = true;
++                continue;
++            default:
++                continue;  // no instructions, no control flow (Nop, Alloc, MarkVsFetchDone...)
++            }
++            for (uint32_t i = 0; i < count; ++i, sequence >>= 2)
++            {
++                const uint32_t index = address + i;
++                if (size_t(index) * 12 + 12 > shaderSize)
++                    return true;
++                union { VertexFetchInstruction vertexFetch; TextureFetchInstruction textureFetch; AluInstruction alu;
++                        struct { uint32_t code0, code1, code2; } w; } iu;
++                iu.w.code0 = code[index * 3];
++                iu.w.code1 = code[index * 3 + 1];
++                iu.w.code2 = code[index * 3 + 2];
++                if (sequence & 0x1)
++                {
++                    if (iu.vertexFetch.opcode == FetchOpcode::VertexFetch)
++                    {
++                        if (indexedFetches.count(index) && iu.vertexFetch.srcRegister == 0)
++                            return true;  // an indexed fetch computes its element from r0
++                        if (iu.vertexFetch.dstRegister == 0 && !iu.vertexFetch.dstRegisterAam &&
++                            (iu.vertexFetch.dstSwizzle & 7) != 7 && !conditional && !iu.vertexFetch.isPredicated)
++                            return false;  // r0.x overwritten for sure
++                    }
++                    else
++                    {
++                        if (iu.textureFetch.srcRegister == 0)
++                            return true;  // texture coordinates from r0
++                        if (iu.textureFetch.dstRegister == 0 && !iu.textureFetch.dstRegisterAm &&
++                            (iu.textureFetch.dstSwizzle & 7) != 7 && !conditional && !iu.textureFetch.isPredicated)
++                            return false;
++                    }
++                    continue;
++                }
++                const AluInstruction& alu = iu.alu;
++                const auto reads0 = [](uint32_t select, uint32_t reg) { return select && (reg & 0x3F) == 0; };
++                const uint32_t vop = uint32_t(alu.vectorOpcode);
++                const bool vectorOneOperand = vop == 8 || vop == 9 || vop == 10 || vop == 19;
++                const bool vectorThreeOperands = vop == 11 || vop == 12 || vop == 13 || vop == 14 || vop == 17;
++                if (reads0(alu.src1Select, alu.src1Register))
++                    return true;
++                if (!vectorOneOperand && reads0(alu.src2Select, alu.src2Register))
++                    return true;
++                if (vectorThreeOperands && reads0(alu.src3Select, alu.src3Register))
++                    return true;
++                const uint32_t sop = uint32_t(alu.scalarOpcode);
++                const bool zeroIdiom = alu.scalarOpcode == AluScalarOpcode::Sgts && alu.src3Negate &&
++                                       (alu.src3Register & 0x80) != 0;
++                if (sop >= 42 && sop <= 47)
++                {
++                    // Mulsc/Addsc/Subsc: the second operand is a temporary encoded in the opcode and src3 fields.
++                    const uint32_t reg = (sop & 1) | (alu.src3Select << 1) | (alu.src3Swizzle & 0x3C);
++                    if (reg == 0)
++                        return true;
++                }
++                else if (alu.scalarOpcode != AluScalarOpcode::RetainPrev && !zeroIdiom &&
++                         reads0(alu.src3Select, alu.src3Register))  // RetainPrev: no scalar operation, nothing read
++                {
++                    return true;
++                }
++                // Writes, after this instruction's reads.
++                if (!conditional && !alu.isPredicated && !alu.exportData)
++                {
++                    // Only operations that surely write their destination: no predicate set/push, kill or MOVA.
++                    const bool vectorWrites = vop < 20 || vop == 28;
++                    if (vectorWrites && alu.vectorDest == 0 && !alu.vectorDestRelative && (alu.vectorWriteMask & 1))
++                        return false;
++                    const bool scalarWrites = (sop < 23 || sop == 25 || sop == 26 || sop == 40 || (sop >= 42 && sop <= 49));
++                    if (scalarWrites && alu.scalarDest == 0 && !alu.scalarDestRelative && (alu.scalarWriteMask & 1))
++                        return false;
++                }
++            }
++            if (ends && !conditional)
++                return false;  // the shader ends here for sure, and nothing read r0
++        }
++    }
++    return true;  // reached the end of the control flow without a sure end: keep it
+ }
+ 
+ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_view& include)
+ {
+     const auto shaderContainer = reinterpret_cast<const ShaderContainer*>(shaderData);
+ 
+-    assert((shaderContainer->flags & 0xFFFFFF00) == 0x102A1100);
+-    assert(shaderContainer->constantTableOffset != NULL);
+-
++    /*
++     * Mass Effect (2008 XDK) has 0x102A11xx; the low byte holds the stage flag.
++     * Only the two high bytes are compared.
++     */
++    assert((shaderContainer->flags & 0xFFFF0000) == 0x102A0000);
++    // banjo-nx: vertex shaders have no implicit derivatives (DXC rejects Sample there): the texture helpers of
++    // shader_common.h sample level 0 instead, which is what a vertex fetch without an explicit LOD reads.
++    if (shaderContainer->flags & 0x1)
++        out += "#define Sample(s, c) SampleLevel(s, c, 0)\n";
+     out += include;
+     out += '\n';
+ 
+     isPixelShader = (shaderContainer->flags & 0x1) == 0;
++    const bool precisePosition = precisePositionEnabled(isPixelShader);
++    const auto codeMetadata = reinterpret_cast<const Shader*>(shaderData + shaderContainer->shaderOffset);
++    const auto validFloatDefinition = [&](const Float4Definition& definition) {
++        const uint64_t begin = definition.physicalOffset;
++        const uint64_t end = begin + ((uint64_t(definition.count) + 3) / 4) * 16;
++        const uint64_t codeBegin = codeMetadata->physicalOffset;
++        const uint64_t codeEnd = codeBegin + uint32_t(codeMetadata->size);
++        // Mass Effect's relocated / immediate shader wrappers can retain a
++        // definition table whose physical offsets now point into instructions.
++        // Those bytes are NOT literals. Original D3D supplies the real values
++        // in the guest float registers; use the normal constant-buffer path.
++        return end <= uint32_t(shaderContainer->physicalSize) &&
++            (end <= codeBegin || begin >= codeEnd);
++    };
+ 
+-    const auto constantTableContainer = reinterpret_cast<const ConstantTableContainer*>(shaderData + shaderContainer->constantTableOffset);
++    // MASSEFFECT: Direct3D's own shaders either have no constant table or carry an empty CTAB.
++    // Both forms are linked by hardware register rather than by semantic names.
++    static const ConstantTableContainer kEmptyConstantTable{};
++    const auto constantTableContainer = shaderContainer->constantTableOffset != NULL
++        ? reinterpret_cast<const ConstantTableContainer*>(shaderData + shaderContainer->constantTableOffset)
++        : &kEmptyConstantTable;
++    linkByRegister = shaderContainer->constantTableOffset == NULL ||
++        constantTableContainer->constantTable.constants == 0;
+     constantTableData = reinterpret_cast<const uint8_t*>(&constantTableContainer->constantTable);
++    literalFloat4.clear();
++    if (shaderContainer->definitionTableOffset != NULL)
++    {
++        auto definitions = reinterpret_cast<const DefinitionTable*>(shaderData + shaderContainer->definitionTableOffset)->definitions;
++        while (*definitions != 0)
++        {
++            auto definition = reinterpret_cast<const Float4Definition*>(definitions);
++            if (validFloatDefinition(*definition))
++                for (uint16_t i = 0; i < (definition->count + 3) / 4; i++)
++                    literalFloat4.insert(definition->registerIndex + i - (isPixelShader ? 256 : 0));
++            definitions += 2;
++        }
++    }
+ 
+     out += "#ifdef __spirv__\n\n";
+ 
+@@ -1152,15 +1752,17 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+ 
+             if (constantInfo->registerCount > 1)
+             {
+-                uint32_t tailCount = (isPixelShader ? 224 : 256) - constantInfo->registerIndex;
++                uint32_t tailCount = 256 - constantInfo->registerIndex;  // banjo-nx: 256 in both stages
+ 
+-                println("#define {}(INDEX) select((INDEX) < {}, vk::RawBufferLoad<float4>(g_PushConstants.{}ShaderConstants + ({} + min(INDEX, {})) * 16, 0x10), 0.0)",
+-                    constantName, tailCount, shaderName, constantInfo->registerIndex.get(), tailCount - 1);
++                // MASSEFFECT: dynamic UBO or pointer, depending on SPEC_CONSTANT_CONSTANTS_UBO.
++                println("#define {}(INDEX) select((INDEX) < {}, (MASSEFFECT_UBO ? g_Ubo{}.v[{} + min(INDEX, {})] : vk::RawBufferLoad<float4>(g_PushConstants.{}ShaderConstants + ({} + min(INDEX, {})) * 16, 0x10)), 0.0)",
++                    constantName, tailCount, shaderName, constantInfo->registerIndex.get(), tailCount - 1,
++                    shaderName, constantInfo->registerIndex.get(), tailCount - 1);
+             }
+             else
+             {
+-                println("#define {} vk::RawBufferLoad<float4>(g_PushConstants.{}ShaderConstants + {}, 0x10)",
+-                    constantName, shaderName, constantInfo->registerIndex * 16);
++                println("#define {} (MASSEFFECT_UBO ? g_Ubo{}.v[{}] : vk::RawBufferLoad<float4>(g_PushConstants.{}ShaderConstants + {}, 0x10))",
++                    constantName, shaderName, constantInfo->registerIndex.get(), shaderName, constantInfo->registerIndex * 16);
+             }
+             
+             for (uint16_t j = 0; j < constantInfo->registerCount; j++)
+@@ -1171,22 +1773,58 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+ 
+         case RegisterSet::Sampler:
+         {
++            // MASSEFFECT: a sampler array (Unreal Engine 3's LightMapTextures, s5..s7) covers
++            // registerCount registers, and the microcode fetches from each of them; only the
++            // first used to get definitions, so the others ended up as undeclared sN_*.
++            // Every register now gets its own set, named <name> for the first and sN after it.
++            for (uint16_t reg = 0; reg < std::max<uint16_t>(1, constantInfo->registerCount); reg++)
++            {
++            const uint32_t registerIndex = constantInfo->registerIndex + reg;
++            char fallbackName[16];
++            std::snprintf(fallbackName, sizeof(fallbackName), "s%u", registerIndex);
++            const char* samplerName = reg == 0 ? constantName : fallbackName;
+             for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)
+             {
+-                println("#define {}_Texture{}DescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {})",
+-                    constantName, TEXTURE_DIMENSIONS[j], j * 64 + constantInfo->registerIndex * 4);
++                println("#define {}_Texture{}DescriptorIndex (MASSEFFECT_UBO ? MASSEFFECT_SHARED_UINT({}) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {}))",
++                    samplerName, TEXTURE_DIMENSIONS[j], j * 64 + registerIndex * 4, j * 64 + registerIndex * 4);
+             }
+ 
+-            println("#define {}_SamplerDescriptorIndex vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {})",
+-                constantName, std::size(TEXTURE_DIMENSIONS) * 64 + constantInfo->registerIndex * 4);
++            println("#define {}_SamplerDescriptorIndex (MASSEFFECT_UBO ? MASSEFFECT_SHARED_UINT({}) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {}))",
++                samplerName, std::size(TEXTURE_DIMENSIONS) * 64 + registerIndex * 4, std::size(TEXTURE_DIMENSIONS) * 64 + registerIndex * 4);
++
++            // 1/size of the host image of that slot, which the renderer writes at byte
++            // 360 + slot * 8 of the shared constants (right after g_InputRemap).
++            {
++                const uint32_t invBase = 360 + registerIndex * 8;
++                println("#define {}_InvSize (MASSEFFECT_UBO ? float2(MASSEFFECT_SHARED_FLOAT({}), MASSEFFECT_SHARED_FLOAT({})) : vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + {}))",
++                    samplerName, invBase, invBase + 4, invBase);
++            }
+ 
+-            samplers.emplace(constantInfo->registerIndex, constantName);
++            if (reg == 0)
++                samplers.emplace(registerIndex, constantName);
++            }
+             break;
+         }
+ 
+         }
+     }
+ 
++    // MASSEFFECT: every fetch constant no table entry names gets the sN_* set (a sampler without a
++    // name, or a shader without a table); #ifndef skips the ones already defined.
++    for (uint32_t reg = 0; reg < 32; reg++)
++    {
++        println("#ifndef s{}_SamplerDescriptorIndex", reg);
++        for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)
++            println("#define s{}_Texture{}DescriptorIndex (MASSEFFECT_UBO ? MASSEFFECT_SHARED_UINT({}) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {}))",
++                reg, TEXTURE_DIMENSIONS[j], j * 64 + reg * 4, j * 64 + reg * 4);
++        println("#define s{}_SamplerDescriptorIndex (MASSEFFECT_UBO ? MASSEFFECT_SHARED_UINT({}) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {}))",
++            reg, std::size(TEXTURE_DIMENSIONS) * 64 + reg * 4, std::size(TEXTURE_DIMENSIONS) * 64 + reg * 4);
++        println("#define s{0}_Texture1DDescriptorIndex s{0}_Texture2DDescriptorIndex", reg);
++        println("#define s{}_InvSize (MASSEFFECT_UBO ? float2(MASSEFFECT_SHARED_FLOAT({}), MASSEFFECT_SHARED_FLOAT({})) : vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + {}))",
++            reg, 360 + reg * 8, 364 + reg * 8, 360 + reg * 8);
++        println("#endif");
++    }
++
+     out += "\n#else\n\n";
+ 
+     println("cbuffer {}ShaderConstants : register(b{}, space4)", isPixelShader ? "Pixel" : "Vertex", isPixelShader ? 1 : 0);
+@@ -1210,7 +1848,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+ 
+             if (constantInfo->registerCount > 1)
+             {
+-                uint32_t tailCount = (isPixelShader ? 224 : 256) - constantInfo->registerIndex;
++                uint32_t tailCount = 256 - constantInfo->registerIndex;  // banjo-nx: 256 in both stages
+                 println("#define {0}(INDEX) select((INDEX) < {1}, {0}[min(INDEX, {2})], 0.0)", constantName, tailCount, tailCount - 1);
+             }
+         }
+@@ -1255,7 +1893,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+         {
+             const char* constantName = reinterpret_cast<const char*>(constantTableData + constantInfo->name);
+             println("\t#define {} (1 << {})", constantName, constantInfo->registerIndex + (isPixelShader ? 16 : 0));
+-            boolConstants.emplace(constantInfo->registerIndex, constantName);
++            // In MASSEFFECT CTAB numbers b0.. and CF uses 128.. for pixels.
++            // The g_Booleans packing keeps its 16 bits per stage.
++            boolConstants.emplace(constantInfo->registerIndex + (isPixelShader ? 128 : 0), constantName);
+         }
+     }
+ 
+@@ -1302,7 +1942,21 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+     else
+     {
+         auto vertexShader = reinterpret_cast<const VertexShader*>(shader);
+-        for (uint32_t i = 0; i < vertexShader->vertexElementCount; i++)
++        // MASSEFFECT: Direct3D's own shaders are linked by fetch destination register: one TEXCOORD<register>
++        // input per full fetch, whatever the element table says (Direct3D rewrites these fetches by register).
++        std::vector<std::pair<uint32_t, uint32_t>> fetchesByRegister;
++        if (linkByRegister)
++        {
++            const auto* words = reinterpret_cast<const be<uint32_t>*>(shaderData + shaderContainer->virtualSize + shader->physicalOffset);
++            std::vector<uint32_t> microcode(shader->size / 4);
++            for (size_t i = 0; i < microcode.size(); i++)
++                microcode[i] = words[i];
++            auto split = classifyVertexFetches(microcode);
++            fetchesByRegister = std::move(split.attributes);
++            indexedFetches = std::move(split.indexed);
++        }
++        const uint32_t elementCount = linkByRegister ? uint32_t(fetchesByRegister.size()) : uint32_t(vertexShader->vertexElementCount);
++        for (uint32_t i = 0; i < elementCount; i++)
+         {
+             union
+             {
+@@ -1310,7 +1964,15 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                 uint32_t value;
+             };
+ 
+-            value = vertexShader->vertexElementsAndInterpolators[vertexShader->field18 + i];
++            if (linkByRegister)
++            {
++                value = 0;
++                vertexElement.address = fetchesByRegister[i].first;
++                vertexElement.usage = DeclUsage::TexCoord;
++                vertexElement.usageIndex = fetchesByRegister[i].second;
++            }
++            else
++                value = vertexShader->vertexElementsAndInterpolators[vertexShader->field18 + i];
+ 
+             const char* usageType = USAGE_TYPES[uint32_t(vertexElement.usage)];
+ 
+@@ -1324,6 +1986,9 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+ 
+             out += '\t';
+ 
++            if (linkByRegister)
++                print("[[vk::location({})]] ", banjoSlotLocation(uint32_t(vertexElement.usageIndex)));
++            else
+             for (auto& usageLocation : USAGE_LOCATIONS)
+             {
+                 if (usageLocation.usage == vertexElement.usage && usageLocation.usageIndex == vertexElement.usageIndex)
+@@ -1345,9 +2010,12 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+             out += "\tin uint iVertexId : SV_VertexID,\n";
+             out += "\tin uint iInstanceId : SV_InstanceID,\n";
+         }
++    #else
++        // banjo-nx: a Xenos vertex shader starts with the vertex index in r0.x (see the register initialization).
++        out += "\tin uint iVertexId : SV_VertexID,\n";
+     #endif
+ 
+-        out += "\tout float4 oPos : SV_Position";
++        out += precisePosition ? "\t[[vk::ext_decorate(18)]] out precise float4 oPos : SV_Position" : "\tout float4 oPos : SV_Position";
+ 
+         for (auto& [usage, usageIndex] : INTERPOLATORS)
+             print(",\n\tout float4 o{0}{1} : {2}{1}", USAGE_VARIABLES[uint32_t(usage)], usageIndex, USAGE_SEMANTICS[uint32_t(usage)]);
+@@ -1378,6 +2046,13 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+         while (*definitions != 0)
+         {
+             auto definition = reinterpret_cast<const Float4Definition*>(definitions);
++            if (!validFloatDefinition(*definition))
++            {
++                println("\t// Relocated definition c{}: read the guest registers, not overlapping microcode.",
++                    definition->registerIndex - (isPixelShader ? 256 : 0));
++                definitions += 2;
++                continue;
++            }
+             auto value = reinterpret_cast<const be<uint32_t>*>(shaderData + shaderContainer->virtualSize + definition->physicalOffset);
+             for (uint16_t i = 0; i < (definition->count + 3) / 4; i++)
+             {
+@@ -1394,22 +2069,20 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+             auto definition = reinterpret_cast<const Int4Definition*>(definitions);
+             for (uint16_t i = 0; i < definition->count; i++)
+             {
+-                union
++                /*
++                 * Named: GCC does not accept the anonymous local union member
++                 * that MSVC and clang accept with -fms-extensions.
++                 */
++                union Bytes4
+                 {
+                     uint32_t value;
+-                    struct
+-                    {
+-                        int8_t x;
+-                        int8_t y;
+-                        int8_t z;
+-                        int8_t w;
+-                    };
+-                };
++                    struct { int8_t x, y, z, w; } b;
++                } u;
+ 
+-                value = definition->values[i].get();
++                u.value = definition->values[i].get();
+ 
+                 println("\tint4 i{} = int4({}, {}, {}, {});",
+-                    (definition->registerIndex - 8992) / 4 + i, x, y, z, w);
++                    (definition->registerIndex - 8992) / 4 + i, u.b.x, u.b.y, u.b.z, u.b.w);
+             }
+             definitions += 2;
+             definitions += definition->count;
+@@ -1420,6 +2093,22 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+ 
+     bool printedRegisters[32]{};
+ 
++    // sa2-nx: interpolators are ALWAYS linked by hardware register, whatever the constant table says. The GPU knows
++    // no semantics: vertex shader export N reaches the pixel shader's interpolator N (Direct3D patches the export
++    // registers when it links a pair, and the microcode the ring loads is the linked one). Linking some shaders by
++    // semantic and others by register broke every mixed pair: a game vertex shader with no constants (an empty
++    // CTAB, so "register-linked") drawing SA2's warning/SEGA/Sonic Team screens with a semantic pixel shader that
++    // keeps COLOR0 in register 0 and TEXCOORD0 in register 1 got its texture coordinates from the colour (black).
++    const bool interpolatorsByRegister = true;
++
++    // MASSEFFECT: register linking: export register N of the vertex shader is TEXCOORDN, read back by the
++    // pixel shader's register N.
++    if (interpolatorsByRegister && !isPixelShader)
++    {
++        for (uint32_t i = 0; i < 16; i++)
++            interpolators.emplace(i, fmt::format("oTexCoord{}", i));
++    }
++
+     uint32_t interpolatorCount = (shader->interpolatorInfo >> 5) & 0x1F;
+ 
+     for (uint32_t i = 0; i < interpolatorCount; i++)
+@@ -1433,14 +2122,18 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+         if (isPixelShader)
+         {
+             value = reinterpret_cast<const PixelShader*>(shader)->interpolators[i];
+-            println("\tfloat4 r{} = i{}{};", uint32_t(interpolator.reg), USAGE_VARIABLES[uint32_t(interpolator.usage)], uint32_t(interpolator.usageIndex));
++            if (interpolatorsByRegister)
++                println("\tfloat4 r{0} = iTexCoord{0};", uint32_t(interpolator.reg));
++            else
++                println("\tfloat4 r{} = i{}{};", uint32_t(interpolator.reg), USAGE_VARIABLES[uint32_t(interpolator.usage)], uint32_t(interpolator.usageIndex));
+             printedRegisters[interpolator.reg] = true;
+         }
+         else
+         {
+             auto vertexShader = reinterpret_cast<const VertexShader*>(shader);
+             value = vertexShader->vertexElementsAndInterpolators[vertexShader->field18 + vertexShader->vertexElementCount + i];
+-            interpolators.emplace(i, fmt::format("o{}{}", USAGE_VARIABLES[uint32_t(interpolator.usage)], uint32_t(interpolator.usageIndex)));
++            if (!interpolatorsByRegister)
++                interpolators.emplace(i, fmt::format("o{}{}", USAGE_VARIABLES[uint32_t(interpolator.usage)], uint32_t(interpolator.usageIndex)));
+         }
+     }
+ 
+@@ -1452,7 +2145,17 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+     #endif
+ 
+         for (auto& [usage, usageIndex] : INTERPOLATORS)
+-            println("\to{}{} = 0.0;", USAGE_VARIABLES[uint32_t(usage)], usageIndex);
++        {
++            // Xenos' default value for an interpolator which the VS does not export is
++            // (0, 0, 0, 1). This matters for register-linked Direct3D shaders: Mass Effect's
++            // UI pixel shader multiplies its alpha by r1.w while several paired vertex shaders
++            // only export r0. Initializing every unused output to float4(0,0,0,0) made that UI
++            // completely transparent.
++            if (interpolatorsByRegister)
++                println("\to{}{} = float4(0.0, 0.0, 0.0, 1.0);", USAGE_VARIABLES[uint32_t(usage)], usageIndex);
++            else
++                println("\to{}{} = 0.0;", USAGE_VARIABLES[uint32_t(usage)], usageIndex);
++        }
+ 
+         out += "\n";
+     }
+@@ -1461,8 +2164,19 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+     {
+         if (!printedRegisters[i])
+         {
+-            print("\tfloat4 r{} = ", i);
+-            if (isPixelShader && i == ((shader->fieldC >> 8) & 0xFF))
++            if (precisePosition) print("\tprecise float4 r{} = ", i);
++            else print("\tfloat4 r{} = ", i);
++            // sa2-nx: register linking, as the hardware does it: the pixel shader's register N is loaded with
++            // interpolator N whether or not the container declares it. A container rebuilt from a template around
++            // ring microcode (MASSEFFECT_SHADER_MISSING) carries the template's interpolator list, not the shader's:
++            // Direct3D's own Clear pixel shader (ps_ba62fb45, oC0 = r0) got an empty list, so r0 became the pixel
++            // position and every clear wrote (x, y, 0, 0) instead of the clear colour. A shader that declares no
++            // interpolator therefore reads them all; shaders that declare some keep their layout.
++            if (isPixelShader && interpolatorsByRegister && interpolatorCount == 0 && i < 16)
++            {
++                out += fmt::format("iTexCoord{};\n", i);
++            }
++            else if (isPixelShader && i == ((shader->fieldC >> 8) & 0xFF))
+             {
+                 out += "float4((iPos.xy - 0.5) * float2(iFace ? 1.0 : -1.0, 1.0), 0.0, 0.0);\n";
+             }
+@@ -1471,6 +2185,22 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+             {
+                 out += "float4(iVertexId + g_IndexCount.x * iInstanceId, 0.0, 0.0, 0.0);\n";
+             }
++        #else
++            else if (!isPixelShader && i == 0 && !vertexIndexMayBeRead(
++                reinterpret_cast<const be<uint32_t>*>(shaderData + shaderContainer->virtualSize + shader->physicalOffset),
++                shader->size, indexedFetches))
++            {
++                // sa2-nx (sa2_gpu_index_base_held): nothing can read the vertex index r0 starts with (see
++                // vertexIndexMayBeRead): with the bit, r0 starts at 0 like the other registers, the shader does not
++                // load the index, and the renderer may hold g_VertexIndexBase.
++                specConstantsMask |= SPEC_CONSTANT_VERTEX_INDEX_UNUSED;
++                out += "(g_SpecConstants() & SPEC_CONSTANT_VERTEX_INDEX_UNUSED) != 0 ? float4(0.0, 0.0, 0.0, 0.0) : "
++                       "float4(float(iVertexId + g_VertexIndexBase), 0.0, 0.0, 0.0);\n";
++            }
++            else if (!isPixelShader && i == 0)
++            {
++                out += "float4(float(iVertexId + g_VertexIndexBase), 0.0, 0.0, 0.0);\n";
++            }
+         #endif
+             else
+             {
+@@ -1480,9 +2210,16 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+     }
+ 
+     out += "\tint a0 = 0;\n";
++    out += "\tint banjoNextA0 = 0;\n";
+     out += "\tint aL = 0;\n";
++    if (!isPixelShader)
++        out += "\tfloat4 oUnused = 0.0;\n";
++    if (isPixelShader && (reinterpret_cast<const PixelShader*>(shader)->outputs & PIXEL_SHADER_OUTPUT_DEPTH))
++        out += "\tfloat4 oDepth4 = 0.0;\n";
++    if (!isPixelShader)
++        out += "\tint banjoVfetchIndex = 0;\n";
+     out += "\tbool p0 = false;\n";
+-    out += "\tfloat ps = 0.0;\n";
++    out += precisePosition ? "\tprecise float ps = 0.0;\n" : "\tfloat ps = 0.0;\n";
+     if (isPixelShader)
+     {
+ #ifdef UNLEASHED_RECOMP
+@@ -1493,22 +2230,33 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+ 
+     const be<uint32_t>* code = reinterpret_cast<const be<uint32_t>*>(shaderData + shaderContainer->virtualSize + shader->physicalOffset);
+ 
+-    union
++    /*
++     * Named, with references: GCC does not accept the anonymous struct inside a local
++     * union that MSVC and clang accept. The references leave the rest of the body
++     * untouched, which uses code0..code3 eighteen times.
++     */
++    union ControlFlowWords
+     {
+         ControlFlowInstruction controlFlow[2];
+-        struct
+-        {
+-            uint32_t code0;
+-            uint32_t code1;
+-            uint32_t code2;
+-            uint32_t code3;
+-        };
+-    };
++        struct { uint32_t code0, code1, code2, code3; } w;
++    } cfu;
++    uint32_t& code0 = cfu.w.code0;
++    uint32_t& code1 = cfu.w.code1;
++    uint32_t& code2 = cfu.w.code2;
++    uint32_t& code3 = cfu.w.code3;
+ 
+     auto controlFlowCode = code;
+     uint32_t instrAddress = 0;
+     uint32_t instrSize = shader->size;
+     bool simpleControlFlow = true;
++    // Mass Effect: every jump goes forward and there are no loops (the 34 skinned VS of the
++    // game). Then no dispatcher loop is needed, see skipControlFlow below.
++    bool forwardOnlyControlFlow = true;
++    uint32_t scanPc = 0;
++    // sa2-nx (sa2_gpu_structured_cf): every jump of the scan (pc -> unconditional, target), for the structuring below,
++    // and every CF instruction that ends the shader (ExecEnd) or may end it (a CondExec*End, inside its own if).
++    std::unordered_map<uint32_t, std::pair<bool, uint32_t>> scanJumps;
++    std::unordered_set<uint32_t> scanConditionalReturns, scanReturns;
+ 
+     while (instrAddress < instrSize)
+     {
+@@ -1517,7 +2265,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+         code2 = (controlFlowCode[1] >> 16) | (controlFlowCode[2] << 16);
+         code3 = controlFlowCode[2] >> 16;
+ 
+-        for (auto& cfInstr : controlFlow)
++        for (auto& cfInstr : cfu.controlFlow)
+         {
+             uint32_t address = 0;
+ 
+@@ -1526,6 +2274,8 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+             case ControlFlowOpcode::Exec:
+             case ControlFlowOpcode::ExecEnd:
+                 address = cfInstr.exec.address;
++                if (cfInstr.opcode == ControlFlowOpcode::ExecEnd)
++                    scanReturns.insert(scanPc);
+                 break;
+ 
+             case ControlFlowOpcode::CondExec:
+@@ -1533,11 +2283,16 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+             case ControlFlowOpcode::CondExecPredClean:
+             case ControlFlowOpcode::CondExecPredCleanEnd:
+                 address = cfInstr.condExec.address;
++                if (cfInstr.opcode == ControlFlowOpcode::CondExecEnd ||
++                    cfInstr.opcode == ControlFlowOpcode::CondExecPredCleanEnd)
++                    scanConditionalReturns.insert(scanPc);
+                 break;
+ 
+             case ControlFlowOpcode::CondExecPred:
+             case ControlFlowOpcode::CondExecPredEnd:
+                 address = cfInstr.condExecPred.address;
++                if (cfInstr.opcode == ControlFlowOpcode::CondExecPredEnd)
++                    scanConditionalReturns.insert(scanPc);
+                 break;
+ 
+             case ControlFlowOpcode::CondJmp:
+@@ -1547,23 +2302,194 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                 else
+                     ++ifEndLabels[cfInstr.condJmp.address];
+ 
++                if (uint32_t(cfInstr.condJmp.address) <= scanPc)
++                    forwardOnlyControlFlow = false;
++                scanJumps[scanPc] = {bool(cfInstr.condJmp.isUnconditional), uint32_t(cfInstr.condJmp.address)};
+                 break;
+             }
++
++            case ControlFlowOpcode::LoopStart:
++            case ControlFlowOpcode::LoopEnd:
++                forwardOnlyControlFlow = false;
++                break;
+             }
+ 
+             if (address != 0)
+                 instrSize = std::min<uint32_t>(instrSize, address * 12);
++            ++scanPc;
+         }
+ 
+         controlFlowCode += 3;
+         instrAddress += 12;
+     }
+ 
+-    if (simpleControlFlow)
++    /*
++     * Mass Effect: forward-only jumps without loops are emitted as straight-line code: each CF
++     * instruction runs under `if (skipTo <= its index)` and a jump sets skipTo to its target.
++     * Exactly the same order and semantics as the pc dispatcher below, without its loop and switch.
++     * The dispatcher made the skinned VS cost ~5 us per vertex on the Switch (NVK/Maxwell): every
++     * case went back through the loop header, so nothing stayed in registers across the 80+ cases.
++     * Like the explicit dispatch, it has no switch fall-through either (the Metal concern below).
++     */
++    bool skipControlFlow = !simpleControlFlow && forwardOnlyControlFlow;
++
++    /*
++     * sa2-nx GPU round 2 (sa2_gpu_structured_cf): the same forward-only control flow as nested if/else.
++     *
++     * The skipTo form puts every CF instruction under `if (skipTo <= pc)`. After two jumps, skipTo is a phi of three
++     * or more constants, and NIR's bcsel folding (nir_opt_algebraic: a comparison of a bcsel of two constants) no
++     * longer turns those tests into the jump conditions: SA2's lighting vertex shaders (72 CF instructions, 11 jumps)
++     * keep a compare and a branch per CF instruction (SSY/BRA/SYNC on Maxwell, which has no uniform datapath), and the
++     * wrapper text between two `if (p0)` blocks stops their merging (reopenClosing). Compiler-generated Xenos jumps
++     * nest: a conditional jump skips to its target (`if (!jump) { ... }`), and an unconditional jump that is the last
++     * instruction of such a region skips the code after the region up to its target: that code is the region's else.
++     * When every jump of a shader fits that pattern, the structured form is emitted too, under
++     * SPEC_CONSTANT_STRUCTURED_CF, and the renderer picks it per pipeline. Before emitting it, the translator checks
++     * that it runs the same CF instructions in the same order as the skipTo form for every combination of jump and
++     * conditional-return outcomes; a difference, or a pattern that does not nest, keeps the skipTo form alone.
++     */
++    std::unordered_map<uint32_t, uint32_t> structuredCloseAt;  // pc -> regions that close before it
++    std::unordered_set<uint32_t> structuredElseAt;             // pc -> the innermost region turns into its else here
++    uint32_t structuredOpenAtEnd = 0;                          // regions still open after the last CF instruction
++    bool structured = false;
++    const uint32_t cfCount = (instrSize / 12) * 2;
++    if (skipControlFlow)
++    {
++        struct Region { uint32_t end; bool isElse; uint32_t opener; };
++        std::vector<Region> stack;
++        // pc -> the regions around it: (the conditional jump that opened the region, true for its else part)
++        std::vector<std::vector<std::pair<uint32_t, bool>>> guards(cfCount);
++        structured = true;
++        for (uint32_t p = 0; p < cfCount && structured; ++p)
++        {
++            while (!stack.empty() && stack.back().end == p)
++            {
++                stack.pop_back();
++                ++structuredCloseAt[p];
++            }
++            for (const Region& r : stack)
++                guards[p].push_back({r.opener, r.isElse});
++            const auto j = scanJumps.find(p);
++            if (j == scanJumps.end())
++                continue;
++            const bool unconditional = j->second.first;
++            const uint32_t target = j->second.second;
++            if (target <= p)
++            {
++                structured = false;
++            }
++            else if (!unconditional)
++            {
++                if (!stack.empty() && target > stack.back().end)
++                    structured = false;
++                else
++                    stack.push_back({target, false, p});
++            }
++            else if (stack.empty() || stack.back().end != p + 1 || stack.back().isElse || target <= p + 1 ||
++                     (stack.size() >= 2 && target > stack[stack.size() - 2].end))
++            {
++                structured = false;
++            }
++            else
++            {
++                stack.back().end = target;
++                stack.back().isElse = true;
++                structuredElseAt.insert(p + 1);
++            }
++        }
++        structuredOpenAtEnd = uint32_t(stack.size());
++
++        // The proof: every outcome of the conditional jumps and conditional returns, in both forms.
++        std::vector<uint32_t> decisions;  // CF instructions whose outcome is only known at run time
++        for (uint32_t p = 0; p < cfCount; ++p)
++        {
++            const auto j = scanJumps.find(p);
++            if ((j != scanJumps.end() && !j->second.first) || scanConditionalReturns.count(p))
++                decisions.push_back(p);
++        }
++        if (structured && decisions.size() > 20)
++            structured = false;  // more than a million outcomes: not checked, so not used
++        for (uint64_t outcome = 0; structured && outcome < (uint64_t(1) << decisions.size()); ++outcome)
++        {
++            const auto taken = [&](uint32_t p) {
++                for (size_t k = 0; k < decisions.size(); ++k)
++                    if (decisions[k] == p)
++                        return ((outcome >> k) & 1) != 0;
++                return false;
++            };
++            std::vector<uint32_t> skipRun, structuredRun;
++            uint32_t skipTo = 0;
++            for (uint32_t p = 0; p < cfCount; ++p)
++            {
++                if (skipTo > p)
++                    continue;
++                skipRun.push_back(p);
++                if (scanReturns.count(p) || (scanConditionalReturns.count(p) && taken(p)))
++                    break;
++                const auto j = scanJumps.find(p);
++                if (j != scanJumps.end() && (j->second.first || taken(p)))
++                    skipTo = j->second.second;
++            }
++            for (uint32_t p = 0; p < cfCount; ++p)
++            {
++                bool runs = true;
++                for (const auto& [opener, inElse] : guards[p])
++                    runs = runs && (taken(opener) == inElse);
++                if (!runs)
++                    continue;
++                structuredRun.push_back(p);
++                if (scanReturns.count(p) || (scanConditionalReturns.count(p) && taken(p)))
++                    break;
++            }
++            if (skipRun != structuredRun)
++            {
++                structured = false;
++                fprintf(stderr, "sa2_gpu_structured_cf: outcome %llu runs other CF instructions: skipTo form only\n",
++                        (unsigned long long)outcome);
++            }
++        }
++    }
++
++    const int emitPasses = structured ? 2 : 1;
++    bool structuredPass = false;
++    uint32_t cfIndentation = 1;
++    uint32_t pc = 0;
++    for (int emitPass = 0; emitPass < emitPasses; ++emitPass)
++    {
++    if (structured)
++    {
++        // Each pass starts with no predicate block open or reopenable (the other pass's text comes in between).
++        predOpen_ = -1;
++        predGuaranteed_ = -1;
++        markClosing_ = closingEnd_ = std::string::npos;
++        cfIndentation = 2;
++        indentation = 2;
++        if (emitPass == 0)
++        {
++            specConstantsMask |= SPEC_CONSTANT_STRUCTURED_CF;
++            out += "\n\t[branch] if (g_SpecConstants() & SPEC_CONSTANT_STRUCTURED_CF)\n\t{\n";
++            simpleControlFlow = true;
++            skipControlFlow = false;
++            structuredPass = true;
++        }
++        else
++        {
++            out += "\t}\n\telse\n\t{\n\t\tuint skipTo = 0;\n";
++            simpleControlFlow = false;
++            skipControlFlow = true;
++            structuredPass = false;
++        }
++    }
++    else if (simpleControlFlow)
+     {
+         out += '\n';
+         indentation = 1;
+     }
++    else if (skipControlFlow)
++    {
++        out += "\n\tuint skipTo = 0;\n";
++        indentation = 1;
++    }
+     else
+     {
+         out += "\n\tuint pc = 0;\n";
+@@ -1575,7 +2501,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+ 
+     controlFlowCode = code;
+     instrAddress = 0;
+-    uint32_t pc = 0;
++    pc = 0;
+ 
+     while (instrAddress < instrSize)
+     {
+@@ -1584,13 +2510,45 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+         code2 = (controlFlowCode[1] >> 16) | (controlFlowCode[2] << 16);
+         code3 = controlFlowCode[2] >> 16;
+ 
+-        for (auto& cfInstr : controlFlow)
++        for (auto& cfInstr : cfu.controlFlow)
+         {
+-            if (!simpleControlFlow)
++            if (skipControlFlow)
++            {
++                indentation = cfIndentation;
++                indent();
++                println("if (skipTo <= {})", pc);
++                indent();
++                out += "{\n";
++                ++indentation;
++            }
++            else if (!simpleControlFlow)
+             {
+                 indentation = 3;
+                 println("\t\tcase {}:", pc);
+             }
++            else if (structuredPass)
++            {
++                if (const auto closes = structuredCloseAt.find(pc); closes != structuredCloseAt.end())
++                {
++                    for (uint32_t i = 0; i < closes->second; i++)
++                    {
++                        --indentation;
++                        indent();
++                        out += "}\n";
++                    }
++                }
++                if (structuredElseAt.count(pc))
++                {
++                    --indentation;
++                    indent();
++                    out += "}\n";
++                    indent();
++                    out += "else\n";
++                    indent();
++                    out += "{\n";
++                    ++indentation;
++                }
++            }
+             else
+             {
+                 auto findResult = ifEndLabels.find(pc);
+@@ -1612,6 +2570,15 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+             uint32_t sequence = 0;
+             bool shouldReturn = false;
+             bool shouldCloseCurlyBracket = false;
++            /*
++             * If this CF opens its own `if (p0)` (CondExecPred), its condition. It serves
++             * two purposes: reusing the identical block that was just closed, and leaving its
++             * own brace recorded so the next one can reuse it. See reopenClosing().
++             */
++            int conditionPredicateCf = -1;
++
++            // Control flow boundary. An open predicated block does not cross this point.
++            closePredicate();
+ 
+             switch (cfInstr.opcode)
+             {
+@@ -1630,7 +2597,22 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                 address = cfInstr.condExec.address;
+                 count = cfInstr.condExec.count;
+                 sequence = cfInstr.condExec.sequence;
+-                shouldReturn = (cfInstr.opcode == ControlFlowOpcode::CondExecEnd || cfInstr.opcode == ControlFlowOpcode::CondExecEnd);
++                shouldReturn = (cfInstr.opcode == ControlFlowOpcode::CondExecEnd || cfInstr.opcode == ControlFlowOpcode::CondExecPredCleanEnd);
++                {
++                    // The condition belongs to the whole EXEC block, including its
++                    // return. Per-instruction ALU predication does not replace it.
++                    const auto boolean = boolConstants.find(cfInstr.condExec.boolAddress);
++                    indent();
++                    if (boolean == boolConstants.end())
++                        // banjo-nx: no CTAB entry: read the bool by its address from the whole bank.
++                        println("if (BANJO_BOOL({}) {}= 0)", uint32_t(cfInstr.condExec.boolAddress), cfInstr.condExec.condition ? "!" : "=");
++                    else
++                        println("if ((g_Booleans & {}) {}= 0)", boolean->second, cfInstr.condExec.condition ? "!" : "=");
++                    indent();
++                    out += "{\n";
++                    ++indentation;
++                    shouldCloseCurlyBracket = true;
++                }
+                 break;
+ 
+             case ControlFlowOpcode::CondExecPred:
+@@ -1639,6 +2621,25 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                 count = cfInstr.condExecPred.count;
+                 sequence = cfInstr.condExecPred.sequence;
+                 shouldReturn = (cfInstr.opcode == ControlFlowOpcode::CondExecPredEnd);
++                conditionPredicateCf = cfInstr.condExecPred.condition ? 1 : 0;
++                /*
++                 * The previous block was this same `if (p0)` and nothing was emitted between
++                 * the two: its brace is deleted and this EXEC continues inside. This way runs of
++                 * CondExecPred with the same predicate (the nine PCF taps, the six lights)
++                 * end up in one basic block instead of three or four.
++                 */
++                if (!reopenClosing(conditionPredicateCf))
++                {
++                    indent();
++                    println("if ({}p0)", conditionPredicateCf ? "" : "!");
++                    indent();
++                    out += "{\n";
++                    ++indentation;
++                }
++                shouldCloseCurlyBracket = true;
++                // This `if` governs the whole block, so the predicated instructions inside
++                // do not have to test it again. See predGuaranteed_.
++                predGuaranteed_ = conditionPredicateCf;
+                 break;
+ 
+             case ControlFlowOpcode::LoopStart:
+@@ -1679,11 +2680,23 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+ 
+             case ControlFlowOpcode::CondJmp:
+             {
+-                if (cfInstr.condJmp.isUnconditional)
++                if (cfInstr.condJmp.isUnconditional && structuredPass)
++                {
++                    // Nothing here: the region this jump ends turns into its else at the region's end (structuredElseAt).
++                }
++                else if (cfInstr.condJmp.isUnconditional)
+                 {
+                     assert(!simpleControlFlow);
+-                    println("\t\t\tpc = {};", uint32_t(cfInstr.condJmp.address));
+-                    out += "\t\t\tcontinue;\n";
++                    if (skipControlFlow)
++                    {
++                        indent();
++                        println("skipTo = {};", uint32_t(cfInstr.condJmp.address));
++                    }
++                    else
++                    {
++                        println("\t\t\tpc = {};", uint32_t(cfInstr.condJmp.address));
++                        out += "\t\t\tcontinue;\n";
++                    }
+                 }
+                 else
+                 {
+@@ -1698,7 +2711,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                         if (findResult != boolConstants.end())
+                             println("if ((g_Booleans & {}) {}= 0)", findResult->second, cfInstr.condJmp.condition ^ simpleControlFlow ? "!" : "=");
+                         else
+-                            println("if (b{} {}= 0)", uint32_t(cfInstr.condJmp.boolAddress), cfInstr.condJmp.condition ^ simpleControlFlow ? "!" : "=");
++                            println("if (BANJO_BOOL({}) {}= 0)", uint32_t(cfInstr.condJmp.boolAddress), cfInstr.condJmp.condition ^ simpleControlFlow ? "!" : "=");  // banjo-nx
+                     }
+ 
+                     if (simpleControlFlow)
+@@ -1707,6 +2720,15 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                         out += "{\n";
+                         ++indentation;
+                     }
++                    else if (skipControlFlow)
++                    {
++                        indent();
++                        out += "{\n";
++                        indent();
++                        println("\tskipTo = {};", uint32_t(cfInstr.condJmp.address));
++                        indent();
++                        out += "}\n";
++                    }
+                     else
+                     {
+                         out += "\t\t\t{\n";
+@@ -1723,22 +2745,24 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+             
+             for (uint32_t i = 0; i < count; i++)
+             {
+-                union
++                /*
++                 * Named, for the same reason as the other two: GCC does not accept
++                 * the anonymous struct inside a local union.
++                 */
++                union InstrWords
+                 {
+                     VertexFetchInstruction vertexFetch;
+                     TextureFetchInstruction textureFetch;
+                     AluInstruction alu;
+-                    struct
+-                    {
+-                        uint32_t code0;
+-                        uint32_t code1;
+-                        uint32_t code2;
+-                    };
+-                };
+-            
+-                code0 = instructionCode[0];
+-                code1 = instructionCode[1];
+-                code2 = instructionCode[2];
++                    struct { uint32_t code0, code1, code2; } w;
++                } iu;
++                VertexFetchInstruction& vertexFetch = iu.vertexFetch;
++                TextureFetchInstruction& textureFetch = iu.textureFetch;
++                AluInstruction& alu = iu.alu;
++
++                iu.w.code0 = instructionCode[0];
++                iu.w.code1 = instructionCode[1];
++                iu.w.code2 = instructionCode[2];
+             
+                 if ((sequence & 0x1) != 0)
+                 {
+@@ -1792,10 +2816,17 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                 instructionCode += 3;
+             }
+ 
++            closePredicate();  // end of the EXEC instructions
++
+             if (shouldReturn)
+             {
+                 if (isPixelShader)
+                 {
++                    if (reinterpret_cast<const PixelShader*>(shader)->outputs & PIXEL_SHADER_OUTPUT_DEPTH)
++                    {
++                        indent();
++                        out += "oDepth = oDepth4.x;\n";
++                    }
+                     specConstantsMask |= SPEC_CONSTANT_ALPHA_TEST;
+ 
+                     indent();
+@@ -1804,7 +2835,8 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                     out += '{';
+ 
+                     indent();
+-                    out += "\tclip(oC0.w - g_AlphaThreshold);\n";
++                    // MASSEFFECT: the 8 comparison functions (alphaTestValue, shader_common.h).
++                    out += "\tclip(alphaTestValue(oC0.w));\n";
+ 
+                     indent();
+                     out += "}";
+@@ -1825,6 +2857,17 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                     indent();
+                     out += '}';
+                 #endif
++                #ifndef UNLEASHED_RECOMP
++                    // sa2-nx (sa2_gpu_blend_skip): a transparent pixel whose blend would leave the target exactly as it
++                    // was is discarded before the blend. The renderer sets these bits only for UNORM targets with no
++                    // depth or stencil write and a blend that keeps the destination; a NaN is never discarded.
++                    specConstantsMask |= SPEC_CONSTANT_BLEND_SKIP_ALPHA | SPEC_CONSTANT_BLEND_SKIP_ZERO;
++                    out += "\n";
++                    indent();
++                    out += "if ((g_SpecConstants() & SPEC_CONSTANT_BLEND_SKIP_ALPHA) != 0 && oC0.w <= 0.0) discard;\n";
++                    indent();
++                    out += "if ((g_SpecConstants() & SPEC_CONSTANT_BLEND_SKIP_ZERO) != 0 && all(oC0 <= 0.0)) discard;\n";
++                #endif
+                 }
+                 else
+                 {
+@@ -1832,11 +2875,14 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+                     if (!hasMtxProjection)
+                 #endif
+                     {
++                        // To host clip space (ndc_scale/ndc_offset from
++                        // draw.cpp): draws in pixels with clipping disabled.
++                        out += "\toPos.xy = oPos.xy * g_NdcScale + g_NdcOffset * oPos.w;\n";
+                         out += "\toPos.xy += g_HalfPixelOffset * oPos.w;\n";
+                     }
+                 }
+ 
+-                if (simpleControlFlow)
++                if (simpleControlFlow || skipControlFlow)
+                 {
+                     indent();
+                 #ifdef UNLEASHED_RECOMP
+@@ -1857,24 +2903,60 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
+             }
+ 
+             if (shouldCloseCurlyBracket)
++            {
++                --indentation;
++                const size_t markKeyCf = out.size();
++                indent();
++                out += "}\n";
++                /*
++                 * It is recorded in case the next CondExecPred is identical. Not with a
++                 * `return` inside, since the block does not continue; and noteClosingCf() also
++                 * refuses if something wrote p0 in here (predGuaranteed_ was set to -1): the
++                 * next block has to test the new p0.
++                 */
++                noteClosingCf(markKeyCf, shouldReturn ? -1 : conditionPredicateCf);
++            }
++            predGuaranteed_ = -1;  // end of the EXEC block: it no longer guarantees anything
++            // Do not rely on implicit switch fall-through for complex Xenos control flow. Large skinned
++            // vertex shaders produce dozens of cases, and the Vulkan -> Metal path may lower the long
++            // fall-through chain incorrectly. Dispatching the next CF instruction explicitly is exactly
++            // equivalent, and also makes every case a closed basic block in SPIR-V/MSL.
++            if (skipControlFlow)
+             {
+                 --indentation;
+                 indent();
+                 out += "}\n";
+             }
++            else if (!simpleControlFlow && !shouldReturn)
++            {
++                println("\t\t\tpc = {};", pc);
++                out += "\t\t\tcontinue;\n";
++            }
+         }
+ 
+         controlFlowCode += 3;
+         instrAddress += 12;
+     }
+ 
+-    if (!simpleControlFlow)
++    if (structuredPass)
++    {
++        for (uint32_t i = 0; i < structuredOpenAtEnd; i++)
++        {
++            --indentation;
++            indent();
++            out += "}\n";
++        }
++    }
++    if (!simpleControlFlow && !skipControlFlow)
+     {
+         out += "\t\t\tbreak;\n";
+         out += "\t\t}\n";
+         out += "\t\tbreak;\n";
+         out += "\t}\n";
+     }
++    }  // emitPass
++    if (structured)
++        out += "\t}\n";
+ 
+ #ifdef UNLEASHED_RECOMP
+     if (hasMtxProjection)
+diff --git a/XenosRecomp/shader_recompiler.h b/XenosRecomp/shader_recompiler.h
+index b2e317d7ca8a913f3a766f6cf22b2c60fcde4987..2cb07e5b4a8e6df815ba4ff231dc41c984eb41b7 100644
+--- a/XenosRecomp/shader_recompiler.h
++++ b/XenosRecomp/shader_recompiler.h
+@@ -1,4 +1,5 @@
+ #pragma once
++#include <unordered_set>
+ 
+ #include "shader.h"
+ #include "shader_code.h"
+@@ -25,12 +26,22 @@ struct ShaderRecompiler : StringBuffer
+ {
+     uint32_t indentation = 0;
+     bool isPixelShader = false;
++    // MASSEFFECT: Direct3D's own shaders have no constant table and are never patched; their interpolators
++    // are linked by register, as the hardware does (see linkByRegister in shader_recompiler.cpp).
++    bool linkByRegister = false;
+     const uint8_t* constantTableData = nullptr;
+     std::unordered_map<uint32_t, VertexElement> vertexElements;
++    // banjo-nx: vertex fetches indexed by a computed register (bone palettes read from a vertex buffer): instruction
++    // index -> indexed buffer number (its fetch constant is passed to the native renderer through the shared
++    // constants, see banjoVfetch in shader_common.h).
++    std::unordered_map<uint32_t, uint32_t> indexedFetches;
+     std::unordered_map<uint32_t, std::string> interpolators;
+     std::unordered_map<uint32_t, const ConstantInfo*> float4Constants;
+     std::unordered_map<uint32_t, const char*> boolConstants;
+     std::unordered_map<uint32_t, const char*> samplers;
++    // MASSEFFECT: float registers set by the definition table (literal c<N> locals); an undeclared
++    // register outside this set is read from the constant buffer directly.
++    std::unordered_set<uint32_t> literalFloat4;
+     std::unordered_map<uint32_t, uint32_t> ifEndLabels;
+     uint32_t specConstantsMask = 0;
+ 
+@@ -45,6 +56,182 @@ struct ShaderRecompiler : StringBuffer
+             out += '\t';
+     }
+ 
++    /*
++     * Merging predicated blocks.
++     *
++     * The translator emitted an `if (p0) { ... }` for every predicated instruction, nested
++     * inside the `if (p0)` of the EXEC block as well. In p_000101 (the ground with shadow)
++     * that was 75 OpBranchConditional, 206 OpLabel and 49 OpPhi for 10 texture samples and
++     * 49 scalar operations. The worst part is not the cost of the branch: the 9 PCF taps end
++     * up in 9 different basic blocks, so the scheduler cannot issue them together and the
++     * texture latency is paid nine times instead of once. The scene runs at 31 % of peak
++     * arithmetic throughput.
++     *
++     * With this, consecutive predicated instructions with the same predicate share a single
++     * block. The semantics are identical (not a single operation is touched), except for the
++     * rule that forces a close:
++     *
++     *   1. before an unpredicated instruction,
++     *   2. after any instruction that writes p0 (otherwise the next one would run testing
++     *      the old p0: that would change the result),
++     *   3. at every control flow boundary (EXEC, jump, loop, return).
++     *
++     * predOpen_: -1 none, 0 open with !p0, 1 open with p0.
++     */
++    int predOpen_ = -1;
++
++    /*
++     * The close is lazy, so merging also works across EXEC blocks.
++     *
++     * The first version of the merge only joined instructions inside the same EXEC block,
++     * because every control flow boundary forces a close (rule 3). But the Xenos splits
++     * blocks every few instructions on its own (the EXEC cannot hold more), and the result
++     * was that the nine PCF samples still fell into three basic blocks:
++     *
++     *     if (p0) { ...tap 1... }
++     *     if (p0) { ...taps 2-7... }     <- three EXECs in a row, same p0, nothing in between
++     *     if (p0) { ...taps 8-9... }
++     *
++     * Between the `}` and the next `if` nothing is emitted: no conditional EXEC, no jump,
++     * no loop, no p0 write. So the `}` is redundant and so is the `if` after it.
++     *
++     * So the close is not decided on the spot: it is written, and if the next thing to be
++     * emitted opens again with the same condition and nothing has been written in between,
++     * the `}` is deleted and emission continues inside the same block. The check is on the
++     * text (`closingEnd_ == out.size()`), which is exactly the condition needed: anything that
++     * could change p0 (or put control flow in between) emits text, and then there is no
++     * merge. The only exception is the close caused by a p0 write (the text was emitted
++     * before the `}`), and that one is marked by hand as not cancelable.
++     *
++     * 185 of the 298 predicated blocks of the 109 pixel shaders merge this way (113 remain),
++     * and 20 of the 36 in the vertex shaders. The nine shadow map taps end up in a single
++     * basic block, which is what the scheduler needed to issue them together.
++     *
++     * Almost none of those blocks are opened by openPredicate(): they are opened by the
++     * control flow's own CondExecPred, which in this game comes in runs of three or four in
++     * a row with the same predicate. That is why the close that must be undoable is also
++     * the CondExecPred one, and why recompile() records its brace with noteClosingCf().
++     * There is one more condition there that is not needed here: if some instruction in the
++     * block wrote p0, the next block has to test the new p0 and merging would leave it with
++     * the old one. That shows in predGuaranteed_, which closeIfWritesPredicate() sets to
++     * -1 right when it happens.
++     */
++    size_t markClosing_ = std::string::npos;  // where the just-written "}" starts (with its tabs)
++    size_t closingEnd_ = std::string::npos;    // where it ends; only valid while it is still out.size()
++    int closingCondition_ = -1;                // the condition that block was open with
++
++    /*
++     * If the last thing written is the `}` of a predicate block with this condition and there is
++     * nothing after it, it is deleted and we are back inside. The caller decides who owns the
++     * brace that will close it: predOpen_ (openPredicate) or the control flow (CondExecPred).
++     */
++    bool reopenClosing(int want)
++    {
++        if (predOpen_ >= 0 || closingCondition_ != want)
++            return false;
++        if (closingEnd_ == std::string::npos || closingEnd_ != out.size())
++            return false;
++        out.resize(markClosing_);
++        ++indentation;
++        markClosing_ = closingEnd_ = std::string::npos;
++        return true;
++    }
++
++    /*
++     * The brace with which the control flow closes a CondExecPred `if (p0)`. It is recorded as
++     * undoable only if the block does not end in `return` and nothing wrote p0 inside.
++     */
++    void noteClosingCf(size_t markKey, int condition)
++    {
++        if (condition >= 0 && predGuaranteed_ == condition)
++        {
++            markClosing_ = markKey;
++            closingEnd_ = out.size();
++            closingCondition_ = condition;
++        }
++        else
++        {
++            markClosing_ = closingEnd_ = std::string::npos;
++        }
++    }
++
++    /*
++     * The second `if (p0)`, the redundant one.
++     *
++     * An EXEC conditioned on the predicate (CondExecPred) opens its own `if (p0)` around the
++     * whole block. Inside, each predicated instruction opened another identical one:
++     *
++     *     if (p0) { if (p0) { ...the nine PCF taps... } }
++     *
++     * That was 307 of the 641 `if (p0)` left after the first merge pass. The inner one decides
++     * nothing: we are already inside the outer one.
++     *
++     * predGuaranteed_ says the control flow already guarantees that predicate, so
++     * openPredicate() emits nothing. And it is invalidated as soon as something writes p0:
++     * from then on the guaranteed value is the old one and it has to be really tested again.
++     * That is the only rule that can break this, and it is the same one as for block merging.
++     */
++    int predGuaranteed_ = -1;
++
++    void openPredicate(bool condition)
++    {
++        const int want = condition ? 1 : 0;
++        if (predOpen_ == want)
++            return;  // already inside the right block: emit nothing
++        if (predOpen_ < 0 && predGuaranteed_ == want)
++            return;  // the EXEC already guarantees it from outside: the inner `if` was redundant
++        // The last thing written is the `}` of a block with this same condition and nothing came
++        // after it: the close is deleted and emission continues inside. See markClosing_.
++        if (reopenClosing(want))
++        {
++            predOpen_ = want;  // now closePredicate() closes the brace
++            return;
++        }
++        closePredicate();
++        indent();
++        println("if ({}p0)", condition ? "" : "!");
++        indent();
++        out += "{\n";
++        ++indentation;
++        predOpen_ = want;
++    }
++
++    void closePredicate()
++    {
++        if (predOpen_ < 0)
++            return;
++        --indentation;
++        const size_t mark = out.size();
++        indent();
++        out += "}\n";
++        // Recorded in case the next instruction asks for the same predicate again.
++        markClosing_ = mark;
++        closingEnd_ = out.size();
++        closingCondition_ = predOpen_;
++        predOpen_ = -1;
++    }
++
++    /*
++     * Closes if the text emitted since `mark` writes the predicate. The text is checked rather
++     * than the opcode on purpose: both places that write p0 (SetpEqPush..SetpGePush for vector
++     * and SetpEq..SetpRstr for scalar) emit "p0 = ", and searching for it cannot go stale if a
++     * third one is ever added.
++     */
++    void closeIfWritesPredicate(size_t mark)
++    {
++        if (out.find("p0 = ", mark) == std::string::npos)
++            return;
++        closePredicate();
++        // The predicate the EXEC guaranteed is no longer valid: it was just rewritten.
++        predGuaranteed_ = -1;
++        /*
++         * And this close cannot be undone. It is the only case in which the text that changes p0
++         * was emitted before the `}`, so the `closingEnd_ == out.size()` rule does not see it:
++         * merging here would put the next instruction in the block of the old p0.
++         */
++        markClosing_ = closingEnd_ = std::string::npos;
++    }
++
+     void printDstSwizzle(uint32_t dstSwizzle, bool operand);
+     void printDstSwizzle01(uint32_t dstRegister, uint32_t dstSwizzle);
+ 

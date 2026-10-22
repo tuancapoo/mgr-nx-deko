@@ -1,0 +1,16 @@
+# Metal Gear Rising: Revengeance - first Switch hardware test.
+sa2_renderer_native = true
+audio_mute = false
+input_xbox_layout = true
+input_joycon_sideways = false
+
+# Keep the original pacing until gameplay speed at 30 FPS is validated.
+mgr_fps_limit = 0
+mgr_dump_shaders = false
+mgr_dump_memory = false
+
+log_to_file = true
+log_level = "info"
+switch_profile_report = true
+switch_profile_stacks = false
+mgr_native_perf_csv = "sdmc:/switch/mgr-nx/logs/native.csv"

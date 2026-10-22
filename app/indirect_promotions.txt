@@ -1,0 +1,9 @@
+# Indirect call sites that go to one target: tools/indirect_calls.py --promote turns each into a guarded
+# direct call. Written by tools/indirect_promotions.py from a PC census (sa2_diag_indirect_census); the
+# guard compares the target, so the list only has to be good, not complete.
+# Census: 1231 sites, 89283886 calls. Promoted: 243 sites whose guards catch 84.9 % of the calls (21 of them with
+# two or three targets, 0 with one dominant target of at least 70 %). Not promoted: 13.6 % of the
+# calls in sites with many targets, 0.0 % to targets outside the generated tree, 1.5 % in sites below
+# 0.02 % of all calls.
+# <function> <site> <target> [<target2> [<target3>]]   # calls in the census, share the guards catch
+# mgr-nx: SA2's list moved to indirect_promotions.sa2.txt (its sites do not exist in MGR); empty until an MGR census.

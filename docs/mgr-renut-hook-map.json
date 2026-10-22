@@ -1,0 +1,324 @@
+{
+  "image_sha256": "0faf40eb6ef614f1ba2496e41a87b3b627fb81dc10e26f63d69ccd7c37da9187",
+  "hooks": [
+    {
+      "address": "0x826B2418",
+      "role": "Direct3D_CreateDevice",
+      "witnesses": [
+        "li r3,24704",
+        "cmpwi cr6,r29,2",
+        "stw r30,24392(r31)"
+      ],
+      "guard_bytes": 64,
+      "fnv32": 3417330913
+    },
+    {
+      "address": "0x826C0C48",
+      "role": "InitializePresentationParameters",
+      "witnesses": [
+        "stw r3,15232(r29)",
+        "stw r5,15236(r29)",
+        "addi r3,r29,13948"
+      ],
+      "guard_bytes": 64,
+      "fnv32": 1311578733
+    },
+    {
+      "address": "0x826C0278",
+      "role": "InitializeApiState",
+      "witnesses": [
+        "lwz r25,14000(r3)",
+        "stw r23,13088(r31)",
+        "stw r10,13084(r31)"
+      ],
+      "guard_bytes": 64,
+      "fnv32": 3662966333
+    },
+    {
+      "address": "0x826C0930",
+      "role": "XenonGpu_Initialize",
+      "witnesses": [
+        "std r11,11008(r3)",
+        "stw r3,11016(r31)",
+        "stw r3,17136(r31)"
+      ],
+      "guard_bytes": 64,
+      "fnv32": 3428409143
+    },
+    {
+      "address": "0x826C0EC8",
+      "role": "HardwareDeviceSetup_reference",
+      "witnesses": [
+        "addi r3,r3,15348",
+        "addi r3,r31,15376",
+        "stfs f13,21996(r31)"
+      ],
+      "guard_bytes": 64,
+      "fnv32": 4266713365
+    },
+    {
+      "address": "0x826B5688",
+      "role": "KickOff",
+      "witnesses": [
+        "lwz r11,13600(r31)",
+        "bl 0x826b5348",
+        "lwz r3,48(r31)"
+      ],
+      "guard_bytes": 64,
+      "fnv32": 2711026478
+    },
+    {
+      "address": "0x826B5348",
+      "role": "KickOffSegment",
+      "witnesses": [
+        "lwz r30,15332(r3)",
+        "stw r10,48(r31)",
+        "bl 0x826b45a8"
+      ],
+      "guard_bytes": 64,
+      "fnv32": 1818435926
+    },
+    {
+      "address": "0x826B58C0",
+      "role": "BeginRingBig",
+      "witnesses": [
+        "rlwinm r30,r4,2,0,29",
+        "bl 0x826b5688",
+        "bl 0x826b45a8"
+      ],
+      "guard_bytes": 64,
+      "fnv32": 3881507820
+    },
+    {
+      "address": "0x826B4078",
+      "role": "RingBufferDeviceAllocate",
+      "witnesses": [
+        "lwz r11,0(r5)",
+        "stw r11,0(r29)",
+        "lwz r11,15320(r3)"
+      ],
+      "guard_bytes": 64,
+      "fnv32": 3612893757
+    },
+    {
+      "address": "0x826B44C0",
+      "role": "AllocateInlineData",
+      "witnesses": [
+        "rlwinm r11,r4,2,0,29",
+        "lwz r3,13920(r31)",
+        "bl 0x826b4078"
+      ],
+      "guard_bytes": 64,
+      "fnv32": 2161343936
+    },
+    {
+      "address": "0x826B45A8",
+      "role": "NewSegment",
+      "witnesses": [
+        "stw r11,48(r31)",
+        "stw r10,56(r31)",
+        "stw r11,52(r31)"
+      ],
+      "guard_bytes": 64,
+      "fnv32": 119849652
+    },
+    {
+      "address": "0x826B5A08",
+      "role": "SetRingBufferParameters",
+      "witnesses": [
+        "bl 0x826b5938",
+        "stw r30,15308(r31)"
+      ],
+      "guard_bytes": 64,
+      "fnv32": 3992375428
+    },
+    {
+      "address": "0x826B42A8",
+      "role": "BlockOnFence",
+      "witnesses": [
+        "lwz r10,11036(r3)",
+        "lwz r11,11024(r3)",
+        "bl 0x826b1c88"
+      ],
+      "guard_bytes": 64,
+      "fnv32": 3351293867
+    },
+    {
+      "address": "0x826B1C88",
+      "role": "CBlocker_Check",
+      "witnesses": [
+        "lwz r29,0(r3)",
+        "lwz r11,11024(r29)",
+        "lwz r11,11016(r29)"
+      ],
+      "guard_bytes": 64,
+      "fnv32": 3215607559
+    },
+    {
+      "address": "0x826B57C8",
+      "role": "IsFencePending",
+      "witnesses": [
+        "lwz r11,11036(r31)",
+        "bl 0x826b5688",
+        "lwz r11,11024(r31)"
+      ],
+      "guard_bytes": 64,
+      "fnv32": 1176474118
+    },
+    {
+      "address": "0x826B59B0",
+      "role": "InsertCallback",
+      "witnesses": [
+        "mr r30,r4",
+        "mr r29,r5",
+        "mr r28,r6",
+        "bl 0x826b4d38"
+      ],
+      "guard_bytes": 64,
+      "fnv32": 3190336919
+    },
+    {
+      "address": "0x826B3050",
+      "role": "SynchronizeToPresentationInterval",
+      "witnesses": [
+        "lwz r11,14000(r31)",
+        "ori r11,r11,16",
+        "stb r11,11069(r31)"
+      ],
+      "guard_bytes": 64,
+      "fnv32": 3552456517
+    },
+    {
+      "address": "0x826B3510",
+      "role": "Swap_shared",
+      "witnesses": [
+        "lwz r11,16968(r31)",
+        "stw r30,11056(r31)",
+        "addi r26,r31,15408"
+      ],
+      "guard_bytes": 64,
+      "fnv32": 893838869
+    },
+    {
+      "address": "0x826BC928",
+      "role": "DrawVertices_shared",
+      "witnesses": [
+        "mr r23,r5",
+        "bl 0x826cb580",
+        "ori r11,r11,8705"
+      ],
+      "guard_bytes": 64,
+      "fnv32": 3030381567
+    },
+    {
+      "address": "0x826BCD40",
+      "role": "DrawIndexedVertices_shared",
+      "witnesses": [
+        "bl 0x826cb580",
+        "lwz r24,12812(r31)"
+      ],
+      "guard_bytes": 64,
+      "fnv32": 2589252038
+    },
+    {
+      "address": "0x826BC468",
+      "role": "BeginVertices",
+      "witnesses": [
+        "mullw r9,r5,r6",
+        "stb r10,12904(r3)",
+        "stw r11,13844(r31)"
+      ],
+      "guard_bytes": 64,
+      "fnv32": 614625999
+    },
+    {
+      "address": "0x826BC260",
+      "role": "ClearF",
+      "witnesses": [
+        "lwz r7,12816(r3)",
+        "lwz r11,12832(r3)",
+        "bl 0x826bbbe0"
+      ],
+      "guard_bytes": 64,
+      "fnv32": 600055073
+    },
+    {
+      "address": "0x826BB0D0",
+      "role": "Resolve",
+      "witnesses": [
+        "lwz r30,260(r1)",
+        "lwz r29,252(r1)",
+        "bl 0x826b9f78"
+      ],
+      "guard_bytes": 64,
+      "fnv32": 2048657980
+    },
+    {
+      "address": "0x826ACD00",
+      "role": "XGRegisterVertexShader",
+      "witnesses": [
+        "li r5,872",
+        "stw r30,32(r31)",
+        "lwz r11,872(r31)"
+      ],
+      "guard_bytes": 64,
+      "fnv32": 2722428818
+    },
+    {
+      "address": "0x826AC3D8",
+      "role": "XGRegisterPixelShader",
+      "witnesses": [
+        "li r10,7",
+        "stw r4,24(r3)"
+      ],
+      "guard_bytes": 52,
+      "fnv32": 995737876
+    },
+    {
+      "address": "0x826AC938",
+      "role": "CreateVertexDeclaration",
+      "witnesses": [
+        "cmplwi cr6,r9,255",
+        "mulli r11,r11,12",
+        "bl 0x826ac848"
+      ],
+      "guard_bytes": 64,
+      "fnv32": 3471847264
+    },
+    {
+      "address": "0x826AAF80",
+      "role": "D3DResource_Destroy",
+      "witnesses": [
+        "clrlwi r10,r11,28",
+        "bl 0x826b42a8",
+        "bl 0x82715a90"
+      ],
+      "guard_bytes": 64,
+      "fnv32": 1499545814
+    },
+    {
+      "address": "0x826B5FC8",
+      "role": "WindowScissor",
+      "witnesses": [
+        "mr r25,r4",
+        "mr r24,r5",
+        "mr r23,r6",
+        "mr r22,r7",
+        "ori r11,r11,8320"
+      ],
+      "guard_bytes": 64,
+      "fnv32": 3147154913
+    },
+    {
+      "address": "0x826B2FC0",
+      "role": "EngineSwapProgress_reference",
+      "witnesses": [
+        "lwz r11,16968(r3)",
+        "lwz r11,16976(r3)",
+        "stw r11,8(r4)"
+      ],
+      "guard_bytes": 32,
+      "fnv32": 2813839267
+    }
+  ]
+}

@@ -1,0 +1,230 @@
+diff --git a/config.h b/config.h
+index b6a504a887f5c933eddfb68d88c906e9f41de323..f323d87307bd700783ebc07ea08c61ed0dba65c3 100644
+--- a/config.h
++++ b/config.h
+@@ -10,6 +10,8 @@
+ #else
+ #include "config_macos_x86_64.h"
+ #endif
++#elif defined(__SWITCH__)
++#include "config_switch_aarch64.h"
+ #elif defined(__gnu_linux__)
+ #if defined(__aarch64__)
+ #include "config_linux_aarch64.h"
+diff --git a/config_masseffect_wmv3.h b/config_masseffect_wmv3.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..396ad9d0e05b7f432cee2bcddd59b9f442bc1952
+--- /dev/null
++++ b/config_masseffect_wmv3.h
+@@ -0,0 +1,51 @@
++/*
++ * Fork addition: WMV3 decoder (VC-1 main profile) for games with WMV cutscenes.
++ *
++ * WMV3 is enabled along with everything it selects in configure: vc1_decoder_select = "blockdsp
++ * h263_decoder h264qpel intrax8 mpegvideo vc1dsp", and in turn h263_decoder, mpegvideo, intrax8,
++ * vc1dsp, me_cmp, mpeg_er and error_resilience. config.h includes it after each platform's header.
++ */
++#undef CONFIG_WMV3_DECODER
++#define CONFIG_WMV3_DECODER 1
++#undef CONFIG_VC1_DECODER
++#define CONFIG_VC1_DECODER 1
++#undef CONFIG_H263_DECODER
++#define CONFIG_H263_DECODER 1
++#undef CONFIG_H263_PARSER
++#define CONFIG_H263_PARSER 1
++#undef CONFIG_H263DSP
++#define CONFIG_H263DSP 1
++#undef CONFIG_MPEGVIDEO
++#define CONFIG_MPEGVIDEO 1
++#undef CONFIG_QPELDSP
++#define CONFIG_QPELDSP 1
++#undef CONFIG_BLOCKDSP
++#define CONFIG_BLOCKDSP 1
++#undef CONFIG_H264QPEL
++#define CONFIG_H264QPEL 1
++#undef CONFIG_INTRAX8
++#define CONFIG_INTRAX8 1
++#undef CONFIG_VC1DSP
++#define CONFIG_VC1DSP 1
++#undef CONFIG_H264CHROMA
++#define CONFIG_H264CHROMA 1
++#undef CONFIG_HPELDSP
++#define CONFIG_HPELDSP 1
++#undef CONFIG_IDCTDSP
++#define CONFIG_IDCTDSP 1
++#undef CONFIG_ME_CMP
++#define CONFIG_ME_CMP 1
++#undef CONFIG_MPEG_ER
++#define CONFIG_MPEG_ER 1
++#undef CONFIG_ERROR_RESILIENCE
++#define CONFIG_ERROR_RESILIENCE 1
++#undef CONFIG_VIDEODSP
++#define CONFIG_VIDEODSP 1
++#undef CONFIG_PIXBLOCKDSP
++#define CONFIG_PIXBLOCKDSP 1
++#undef CONFIG_STARTCODE
++#define CONFIG_STARTCODE 1
++#undef CONFIG_FDCTDSP
++#define CONFIG_FDCTDSP 1
++#undef CONFIG_WMV2DSP
++#define CONFIG_WMV2DSP 1
+diff --git a/config_switch_aarch64.h b/config_switch_aarch64.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..c2a507ccff96ad072bb4c971bbd21448ddc94592
+--- /dev/null
++++ b/config_switch_aarch64.h
+@@ -0,0 +1,16 @@
++/* FFmpeg configuration for Nintendo Switch (Horizon, aarch64, devkitA64).
++ *
++ * The Xenia FFmpeg fork ships one config header per desktop/mobile OS and none
++ * for Horizon. Linux/aarch64 is the closest: same CPU features (NEON, ARMv8,
++ * inline assembly) and pthreads, which libnx provides. Only what Horizon lacks
++ * is turned off. Verified by compiling every libavutil and libavcodec source
++ * the SDK builds (NEON .S files included) with devkitA64. */
++#pragma once
++#include "config_linux_aarch64.h"
++
++#undef HAVE_SCHED_GETAFFINITY
++#define HAVE_SCHED_GETAFFINITY 0
++#undef HAVE_MMAP
++#define HAVE_MMAP 0
++#undef HAVE_SYSCONF
++#define HAVE_SYSCONF 0
+diff --git a/libavcodec/fft_template.c b/libavcodec/fft_template.c
+index 69f0a64de4289e39594015d31797ab0d559656ca..ba3de5a70b165898b0c34d6e172c06700f69f209 100644
+--- a/libavcodec/fft_template.c
++++ b/libavcodec/fft_template.c
+@@ -292,8 +292,47 @@ av_cold int ff_fft_init(FFTContext *s, int nbits, int inverse)
+     }\
+ } while(0);
+ 
+-    if (s->revtab)
+-        SPLIT_RADIX_PERMUTATION()
++    /*
++     * Fork addition: the permutation table only depends on (nbits, inverse,
++     * fft_permutation) and comes out identical every time. The XMA decoder
++     * reopens the codec on every new sound (XmaContext::ResetDecoderState), and
++     * in a collision there are many at once: on the console, MDCT initialization
++     * and split_radix_permutation were ~28 % of the XMA thread in the slow
++     * stretches. It is computed once per configuration and copied afterwards:
++     * same values, same audio.
++     */
++    if (s->revtab) {
++        static AVMutex masseffect_revtab_lock = AV_MUTEX_INITIALIZER;
++        static struct { int nbits, inverse, perm; uint16_t *tab; } masseffect_revtab_cache[16];
++        static int masseffect_revtab_n = 0;
++        uint16_t *cached = NULL;
++        ff_mutex_lock(&masseffect_revtab_lock);
++        for (i = 0; i < masseffect_revtab_n; i++) {
++            if (masseffect_revtab_cache[i].nbits == nbits &&
++                masseffect_revtab_cache[i].inverse == s->inverse &&
++                masseffect_revtab_cache[i].perm == s->fft_permutation) {
++                cached = masseffect_revtab_cache[i].tab;
++                break;
++            }
++        }
++        if (cached) {
++            memcpy(s->revtab, cached, n * sizeof(uint16_t));
++        } else {
++            SPLIT_RADIX_PERMUTATION()
++            if (masseffect_revtab_n < 16) {
++                uint16_t *copy = malloc(n * sizeof(uint16_t));
++                if (copy) {
++                    memcpy(copy, s->revtab, n * sizeof(uint16_t));
++                    masseffect_revtab_cache[masseffect_revtab_n].nbits = nbits;
++                    masseffect_revtab_cache[masseffect_revtab_n].inverse = s->inverse;
++                    masseffect_revtab_cache[masseffect_revtab_n].perm = s->fft_permutation;
++                    masseffect_revtab_cache[masseffect_revtab_n].tab = copy;
++                    masseffect_revtab_n++;
++                }
++            }
++        }
++        ff_mutex_unlock(&masseffect_revtab_lock);
++    }
+     if (s->revtab32)
+         SPLIT_RADIX_PERMUTATION(32)
+ 
+diff --git a/libavcodec/mdct_template.c b/libavcodec/mdct_template.c
+index ca2e308b25047a37a7d75a93a2c1caeeba04df0b..c06479e61c3d1d4473ab51fda7a6f22feccf15a8 100644
+--- a/libavcodec/mdct_template.c
++++ b/libavcodec/mdct_template.c
+@@ -24,6 +24,7 @@
+ #include "libavutil/common.h"
+ #include "libavutil/libm.h"
+ #include "libavutil/mathematics.h"
++#include "libavutil/thread.h"  /* Fork addition: table cache */
+ #include "fft.h"
+ #include "fft-internal.h"
+ 
+@@ -44,7 +45,7 @@
+ static av_always_inline
+ double cosfast(double x) 
+ {
+-	//todo:calc sin too
++	// todo:calc sin too
+     double inv2pi = 1.0 / (2.0 * M_PI);
+     x *= inv2pi;
+     x -= 0.25 + floor(x + 0.25);
+@@ -89,6 +90,62 @@ av_cold int ff_mdct_init(FFTContext *s, int nbits, int inverse, double scale)
+         goto fail;
+     }
+ 
++    /*
++     * Fork addition: the tcos/tsin table only depends on (nbits, scale,
++     * mdct_permutation) and comes out identical every time, but it costs n/4
++     * sines and cosines. The XMA decoder reopens the codec on every new sound;
++     * in a collision there are many at once. It is computed once per
++     * configuration and copied afterwards: exactly the same values, same audio.
++     * See fft_template.c.
++     */
++    {
++        static AVMutex masseffect_tcos_lock = AV_MUTEX_INITIALIZER;
++        static struct { int nbits, perm; double scale; FFTSample *tab; } masseffect_tcos_cache[16];
++        static int masseffect_tcos_n = 0;
++        const double scale_key = scale;
++        FFTSample *cached = NULL;
++        ff_mutex_lock(&masseffect_tcos_lock);
++        for (i = 0; i < masseffect_tcos_n; i++) {
++            if (masseffect_tcos_cache[i].nbits == nbits &&
++                masseffect_tcos_cache[i].perm == s->mdct_permutation &&
++                masseffect_tcos_cache[i].scale == scale_key) {
++                cached = masseffect_tcos_cache[i].tab;
++                break;
++            }
++        }
++        if (cached) {
++            memcpy(s->tcos, cached, (n / 2) * sizeof(FFTSample));
++            ff_mutex_unlock(&masseffect_tcos_lock);
++            return 0;
++        }
++        ff_mutex_unlock(&masseffect_tcos_lock);
++        theta = 1.0 / 8.0 + (scale < 0 ? n4 : 0);
++        scale = sqrt(fabs(scale));
++        for(i=0;i<n4;i++) {
++            alpha = 2 * M_PI * (i + theta) / n;
++#if FFT_FIXED_32
++            s->tcos[i*tstep] = lrint(-cosfast(alpha) * 2147483648.0);
++            s->tsin[i*tstep] = lrint(-sin(alpha) * 2147483648.0);
++#else
++            s->tcos[i*tstep] = FIX15(-cosfast(alpha) * scale);
++            s->tsin[i*tstep] = FIX15(-sin(alpha) * scale);
++#endif
++        }
++        ff_mutex_lock(&masseffect_tcos_lock);
++        if (masseffect_tcos_n < 16) {
++            FFTSample *copy = malloc((n / 2) * sizeof(FFTSample));
++            if (copy) {
++                memcpy(copy, s->tcos, (n / 2) * sizeof(FFTSample));
++                masseffect_tcos_cache[masseffect_tcos_n].nbits = nbits;
++                masseffect_tcos_cache[masseffect_tcos_n].perm = s->mdct_permutation;
++                masseffect_tcos_cache[masseffect_tcos_n].scale = scale_key;
++                masseffect_tcos_cache[masseffect_tcos_n].tab = copy;
++                masseffect_tcos_n++;
++            }
++        }
++        ff_mutex_unlock(&masseffect_tcos_lock);
++        return 0;
++    }
+     theta = 1.0 / 8.0 + (scale < 0 ? n4 : 0);
+     scale = sqrt(fabs(scale));
+     for(i=0;i<n4;i++) {

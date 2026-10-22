@@ -1,0 +1,7 @@
+# Guest functions replaced by localized copies (tools/localize_native.py), regenerated into app/generated/hot/ by
+# tools/codegen.ps1 after every codegen, so each copy matches the flavour it is built with. One per line:
+# <address> <what>
+#
+# Empty for Metal Gear Rising: Sonic Adventure 2's list (njCalcPoint, njMultiMatrix, ...) named functions of its own
+# executable that do not exist here (post_codegen.py stopped at "sub_82146ED8 not found", 2026-10-15). Fill it from a
+# profile of MGR's game thread on the console, one function at a time, each with its evidence.

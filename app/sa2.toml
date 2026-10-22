@@ -1,0 +1,32 @@
+# Settings read at startup (ReXGlue cvars). The build copies this file next to the executable when there is none
+# there yet; edit the copy. Any cvar can also be given on the command line (--name=value) or as REX_<NAME>.
+
+# XBLA titles ask XAM for their license; 0 means "trial". Your purchased copy of the game is the full version.
+license_mask = 1
+
+# GPU: stage 1 draws with ReXGlue's emulated Xenos GPU (D3D12 on Windows).
+gpu_plugin = "xenos"
+
+log_level = "info"
+
+# Development defaults: launch muted and minimized (in the taskbar, no fullscreen, no focus), so test runs do not
+# take over the desktop or the speakers. Set both to false to play.
+audio_mute = true
+window_start_minimized = true
+
+# Stage 2 tracing of the game's Direct3D (app/src/sa2_d3d_trace.cpp): calls and callers every 5 s.
+sa2_d3d_trace = false
+
+# Stage 2: the native Vulkan renderer (app/src/me) instead of the emulated Xenos GPU. Needs sa2_shaders.mesp next to
+# the executable (tools/build_shader_library.sh from a shader dump).
+sa2_renderer_native = false
+# Write every shader container the game creates to shaders/ next to the executable, for the shader package.
+sa2_dump_shaders = false
+
+# Native renderer: render resolution per console mode and MSAA (the same keys as the Switch's sa2.toml). On the PC the
+# mode is simulated: sa2_render_docked picks the starting one and the F9 key (bind_sa2_docked) switches between docked
+# and handheld while the game runs, as docking the Switch does.
+sa2_render_height_handheld = 720
+sa2_render_height_docked = 1080
+sa2_render_docked = false
+sa2_msaa = 0
