@@ -35,7 +35,7 @@ Known issues and the work log are in [docs/](docs/). Report problems with the `l
 
 ## Installing
 
-1. Open the installer page: **(coming soon)**
+1. Open the installer page: **https://tuancapoo.github.io/mgr-nx-deko-installer/**
 2. Choose your game folder. The page checks your copy, downloads the build and makes the shader package
    (`deko3d_glsl.bin`) from your own files. Your game files never leave your computer.
 3. Extract the zip into the root of the SD card: it makes `sdmc:/switch/mgr-nx-deko/`.
