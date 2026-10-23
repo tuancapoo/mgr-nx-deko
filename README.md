@@ -19,7 +19,7 @@ took for its 1.0.3.
 | | |
 |---|---|
 | Boots, menus, title, in-game | yes |
-| Frame rate (handheld, 360p internal, CPU 1785 MHz / GPU 768 MHz) | menus 55–60 FPS, gameplay 40–52 FPS |
+| Frame rate (handheld, 720p internal, CPU 1785 MHz / GPU 768 MHz) | menus 55–60 FPS, gameplay 40–52 FPS |
 | Frame rate at stock clocks | not measured yet |
 | Shaders | all 1,202 of the game's shader containers are read from `media/data000.cpk`; compiled for the console once, at the first start (a progress screen) |
 | Tested on | one Switch (Atmosphère, title takeover) |
