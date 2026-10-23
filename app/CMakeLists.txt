@@ -38,6 +38,8 @@ endif()
 
 set(MGR_SOURCES
     mgr_src/mgr_main.cpp
+    # Guest functions the code generator missed, registered at startup (the Sundowner crash, 2026-10-23).
+    mgr_src/mgr_missing_functions.cpp
     # Stage 4, milestone 2: the shader container dump (--mgr_dump_shaders=true) on CreateVertexShader / CreatePixelShader.
     mgr_src/mgr_shader_dump.cpp
 )
@@ -215,7 +217,7 @@ if(REXGLUE_PLATFORM_SWITCH)
     set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/sa2_register.cpp"
         APPEND PROPERTY COMPILE_OPTIONS -O0)
     set_source_files_properties(generated/default/sa2_register.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
-    rexglue_switch_add_nro(sa2 NAME "Metal Gear Rising deko3d" AUTHOR "MGR-NX" VERSION "0.2.1"
+    rexglue_switch_add_nro(sa2 NAME "Metal Gear Rising deko3d" AUTHOR "MGR-NX" VERSION "0.2.2"
         ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon_mgr.jpg")
 endif()
 

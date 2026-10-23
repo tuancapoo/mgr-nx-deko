@@ -26,6 +26,8 @@
 #include <rex/input/input_system.h>
 #include <rex/system/xthread.h>
 
+#include "mgr_missing_functions.h"
+
 #if defined(MGR_NATIVE_RENDERER) || defined(MGR_RENUT_RENDERER)
 #include "cpu/sa2_enhancements.h"
 #include "me/sa2_render_mode.h"
@@ -394,6 +396,9 @@ class MgrApp : public rex::ReXApp {
   // and the writer (core/perf/counter.cpp) but nothing opens the file, so the app does. Only in builds with
   // REXGLUE_ENABLE_PERF_COUNTERS (every configuration but Release).
   void OnPostSetup() override {
+    if (auto* rt = runtime()) {
+      mgr::RegisterMissingFunctions(rt->function_dispatcher());
+    }
 #if defined(MGR_NATIVE_RENDERER) || defined(MGR_RENUT_RENDERER)
     sa2::enh::StartReport();
     sa2::render::RegisterKeys();
