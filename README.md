@@ -14,12 +14,6 @@ took for its 1.0.3.
 > Xbox 360 game. Everything made from it (the recompiled code, the translated shaders, the game folder) is made on
 > your own computer.
 
-## Support me
-
-Buy me a coffee to get the latest news on the next games: **[ko-fi.com/tuannguyen48448](https://ko-fi.com/tuannguyen48448)**
-
-<a href="https://ko-fi.com/tuannguyen48448"><img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support me on Ko-fi"></a>
-
 ## Status
 
 | | |
@@ -96,3 +90,9 @@ provide their own legally obtained copy. Running homebrew requires custom firmwa
 service and can get a console banned.
 
 Licensed under the GNU GPL v3 (see [LICENSE](LICENSE)), as the port it derives from.
+
+## Support me
+
+Buy me a coffee to help fund the next projects: **[ko-fi.com/tuannguyen48448](https://ko-fi.com/tuannguyen48448)**
+
+<a href="https://ko-fi.com/tuannguyen48448"><img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support me on Ko-fi"></a>
