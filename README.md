@@ -1,3 +1,4 @@
+<p align=center><img src="app/icon_mgr.jpg" alt="" width="20%"></p>
 <h1 align=center>Metal Gear Rising: Revengeance — Nintendo Switch port (deko3d)</h1>
 
 An experimental native Nintendo Switch port of the Xbox 360 version of **Metal Gear Rising: Revengeance** (2013).
@@ -13,6 +14,12 @@ took for its 1.0.3.
 > Xbox 360 game. Everything made from it (the recompiled code, the translated shaders, the game folder) is made on
 > your own computer.
 
+## Support me
+
+Buy me a coffee to get the latest news on the next games: **[ko-fi.com/tuannguyen48448](https://ko-fi.com/tuannguyen48448)**
+
+<a href="https://ko-fi.com/tuannguyen48448"><img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Support me on Ko-fi"></a>
+
 ## Status
 
 | | |
@@ -23,13 +30,13 @@ took for its 1.0.3.
 | Shaders | all 1,202 of the game's shader containers are read from `media/data000.cpk`; compiled for the console once, at the first start (a progress screen) |
 | Tested on | one Switch (Atmosphère, title takeover) |
 
-Known issues and the work log are in [docs/](docs/). Report problems with the `logs/` folder of the game's SD folder.
+Report problems with the `logs/` folder of the game's SD folder.
 
 ## Requirements
 
 - A Switch with custom firmware (Atmosphère) and the homebrew menu started by **title takeover** (hold R while
   starting a game) — applet mode does not have enough memory.
-- Your own copy of **Metal Gear Rising: Revengeance** for Xbox 360, extracted: the folder that holds `default.xex`
+- Your own copy of **Metal Gear Rising - Revengeance (USA, Europe) (En,Ja,Fr,De,Es,It,Pt)** for Xbox 360 (other versions are not supported), extracted: the folder that holds `default.xex`
   and `media/` (`media/data000.cpk`, `media/data001.cpk`, `movie/`, `movie_ui/`, `sound/`).
 - About 8 GB free on the SD card (exFAT or FAT32: no file of the game is over 4 GB).
 
@@ -48,7 +55,7 @@ Known issues and the work log are in [docs/](docs/). Report problems with the `l
 
 | Setting | Default | |
 |---|---|---|
-| `sa2_render_height_handheld`, `sa2_render_height_docked` | `360` | Internal resolution: `720` renders at 1280x720 (heavier on the GPU) |
+| `sa2_render_height_handheld`, `sa2_render_height_docked` | `720` | Internal resolution: 1280x720; `360` is lighter on the GPU |
 | `mgr_fps_limit` | `0` | `30` locks the game to 30 FPS (steadier frame pacing) |
 | `audio_mute` | `false` | |
 
@@ -84,7 +91,7 @@ run each step:
 ## Legal
 
 No affiliation with Konami, PlatinumGames, Microsoft or Nintendo. "Metal Gear Rising: Revengeance" is a trademark of
-Konami Digital Entertainment. This repository contains no assets or program code from the original game; users must
+Konami Digital Entertainment, as is the cover art used as the icon (`app/icon_mgr.jpg`). This repository contains no other assets or program code from the original game; users must
 provide their own legally obtained copy. Running homebrew requires custom firmware, which violates Nintendo's terms of
 service and can get a console banned.
 

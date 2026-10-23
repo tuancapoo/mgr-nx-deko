@@ -215,7 +215,8 @@ if(REXGLUE_PLATFORM_SWITCH)
     set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/sa2_register.cpp"
         APPEND PROPERTY COMPILE_OPTIONS -O0)
     set_source_files_properties(generated/default/sa2_register.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
-    rexglue_switch_add_nro(sa2 NAME "Metal Gear Rising deko3d" AUTHOR "MGR-NX" VERSION "0.2.0")
+    rexglue_switch_add_nro(sa2 NAME "Metal Gear Rising deko3d" AUTHOR "MGR-NX" VERSION "0.2.1"
+        ICON "${CMAKE_CURRENT_SOURCE_DIR}/icon_mgr.jpg")
 endif()
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")

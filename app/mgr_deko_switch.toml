@@ -2,8 +2,8 @@
 # The old Vulkan cache and .mesp library belong to the reference renderer.
 sa2_renderer = "renut"
 renut_gpu_backend = "deko3d"
-sa2_render_height_handheld = 360
-sa2_render_height_docked = 360
+sa2_render_height_handheld = 720
+sa2_render_height_docked = 720
 sa2_renut_msaa = 0
 sa2_renut_vblank_pacing = true
 mgr_renut_vsync_relaxed = true

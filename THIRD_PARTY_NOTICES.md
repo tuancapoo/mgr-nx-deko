@@ -4,7 +4,7 @@
 
 The new renderer and tooling are imported from sa2-nx v1.0.3.1,
 `adf3a4eee524dcca5cd7c1b42454ddb8a09124a1`. Its full notices are retained in
-`docs/upstream-sa2-deko-notices.md`. The new Switch build does not link NVK;
+[UPSTREAM_SA2_NOTICES.md](UPSTREAM_SA2_NOTICES.md). The new Switch build does not link NVK;
 references to that driver below describe the retained reference implementation.
 
 - `app/src/renut_engine`: reNut's renderer, with the adaptations from banjo-nx
@@ -36,7 +36,7 @@ license of the folder it is in (see below).
 
 The Horizon (Switch) layer added to `sdk/` is under the SDK's BSD-3-Clause license, and the changes in `shaders/`
 under XenosRecomp's MIT license, so they can be reused by other ports. The rest of this repository (`app/`, `tools/`,
-`docs/`, `patches/`) is GPL-3.0 (`LICENSE`).
+`patches/`) is GPL-3.0 (`LICENSE`).
 
 ## Changes to third-party code
 
@@ -93,7 +93,7 @@ This port changes these files of the SDK's third-party tree; the changed copies 
 
 The rest of FFmpeg and libmspack is the unmodified upstream source at the commits pinned by ReXGlue SDK v0.10.0.
 Everything needed to rebuild and relink the NRO with a modified version of either library is in this repository and in
-[docs/building.md](docs/building.md).
+the "Building" section of [README.md](README.md#building).
 
 ## The installer page
 

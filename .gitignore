@@ -65,3 +65,4 @@ __pycache__/
 # The SA2 checkout it was ported from, and SA2's PGO profile (not MGR's).
 /upstream/
 /pgo/
+/docs/
